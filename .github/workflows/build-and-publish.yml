@@ -38,7 +38,7 @@ jobs:
 
       - name: Output matrix.json
         id: output-matrix
-        run: echo "matrix=$(cat matrix.json)" >> $GITHUB_OUTPUT
+        run: echo "matrix=$(jq -c . < matrix.json)" >> $GITHUB_OUTPUT
 
       - name: Commit matrix.json if changed
         run: |
