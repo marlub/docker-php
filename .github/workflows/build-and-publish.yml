@@ -169,6 +169,8 @@ jobs:
 
       - name: Create manifest from digests
         run: |
+          id="${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}"
+
           TAG_PATCH="${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}"
           TAG_MINOR="${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}"
 
