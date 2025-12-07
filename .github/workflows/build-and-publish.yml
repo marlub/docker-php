@@ -61,7 +61,7 @@ jobs:
           - linux/amd64
           - linux/arm64
     runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' }}
-    name: ${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}
+    name: ${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}-${{ matrix.platform }}
     outputs:
       id: ${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}
       digest: ${{ steps.build-push.outputs.digest }}
@@ -125,10 +125,11 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           target: ${{ steps.tags.outputs.TARGET }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
 
           build-args: |
-            BASE_TAG=${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
+            BASE_TAG=${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}
             EXTENSIONS=${{ matrix.phpimage.extensions }}
             PECL=${{ matrix.phpimage.pecl }}
             PACKAGES=${{ matrix.phpimage.packages }}
