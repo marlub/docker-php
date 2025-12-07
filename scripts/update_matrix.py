@@ -35,7 +35,7 @@ def load_existing(path):
             data = json.load(f)
             existing = {}
             for item in data.get("phpimages", []):
-                key = (item["major"], item["minor"], item["variant"])
+                key = (item["major"], item["minor"], item["variant"], item["os"], item["node"])
                 existing[key] = item
             return existing
     except FileNotFoundError:
@@ -44,39 +44,59 @@ def load_existing(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source-url", default="https://raw.githubusercontent.com/docker-library/php/master/versions.json")
-    ap.add_argument("--variants", nargs="+", default=["fpm-alpine"])
+    ap.add_argument("--variants", nargs="+", default=["fpm"])
+    ap.add_argument("--os", nargs="+", default=["alpine"])
+    ap.add_argument("--platforms", default="linux/amd64,linux/arm64")
+    ap.add_argument("--extensions", default="bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof")
+    ap.add_argument("--pecl", default="")
+    ap.add_argument("--packages", default="")
+    ap.add_argument("--node", nargs="+", default=["", "24"])
     ap.add_argument("--out", default="matrix.json")
+    ap.add_argument("--source-url", default="https://raw.githubusercontent.com/docker-library/php/master/versions.json")
     args = ap.parse_args()
 
     upstream = fetch_json(args.source_url)
     latest = parse_versions(upstream)
-    existing = load_existing(args.out)
-
-    new_entries = {}
+    entries = load_existing(args.out)
 
     for (major, minor), ver in latest.items():
         for variant in args.variants:
-            key = (major, minor, variant)
+            for os in args.os:
+                for node in args.node:
+                    key = (major, minor, variant, os, node)
 
-            if key in existing:
-                item = existing[key]
-                item["patch"] = ver["patch"]
-            else:
-                item = {
-                    "major": major,
-                    "minor": minor,
-                    "patch": ver["patch"],
-                    "variant": variant,
-                    "extensions": "",
-                    "pecl": "",
-                    "packages": ""
-                }
+                    if key not in entries:
+                        entries[key] = {
+                            "major": major,
+                            "minor": minor,
+                            "patch": ver["patch"],
+                            "variant": variant,
+                            "os": os,
+                            "extensions": args.extensions,
+                            "pecl": args.pecl,
+                            "packages": args.packages,
+                            "node": node,
+                            "platforms": args.platforms
+                        }
 
-            new_entries[key] = item
+    for (major, minor, variant, os, node), entry in entries.items():
+        key = (major, minor)
+        if key in latest:
+            entry["patch"] = latest[key]["patch"]
+
+    entries = sorted(
+        entries.values(),
+        key=lambda item: (
+            item["major"],
+            item["minor"],
+            item["os"],
+            item["variant"],
+            int(item["node"] or 0)
+        )
+    )
 
     with open(args.out, "w") as f:
-        json.dump({"phpimages": list(new_entries.values())}, f, indent=2)
+        json.dump({"phpimages": list(entries)}, f, indent=2)
 
 
 if __name__ == "__main__":

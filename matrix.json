@@ -1,0 +1,16 @@
+{
+  "phpimages": [
+    {
+      "major": 8,
+      "minor": 4,
+      "patch": 15,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": "",
+      "platforms": "linux/amd64,linux/arm64"
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+name: Build & publish PHP images with extensions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: marlub/php
+
+jobs:
+  update-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.output-matrix.outputs.matrix }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install requests packaging
+
+#      - name: Update matrix.json
+#        run: |
+#          python scripts/update_matrix.py
+
+      - name: Output matrix.json
+        id: output-matrix
+        run: echo "matrix=$(cat matrix.json)" >> $GITHUB_OUTPUT
+
+      - name: Commit matrix.json if changed
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@example.com"
+
+          if ! git diff --quiet matrix.json; then
+            git add matrix.json
+            git commit -m "Update matrix.json [auto]"
+            git push
+          fi
+
+  build-and-push:
+    needs: update-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        phpimage: ${{ fromJson(needs.update-matrix.outputs.matrix).phpimages }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Populate tags
+        id: tags
+        run: |
+          TAG_OS="${{ matrix.phpimage.os }}"
+          TAG_NODE="${{ matrix.phpimage.node }}"
+          TARGET="php"
+          if [ "$TAG_OS" != "" ]; then
+            TAG_OS="-$TAG_OS"
+          fi
+          if [ "$TAG_NODE" != "" ]; then
+            TAG_NODE="-node$TAG_NODE"
+            TARGET="php-node"
+          fi
+          echo "OS=$TAG_OS" >> $GITHUB_OUTPUT
+          echo "NODE=$TAG_NODE" >> $GITHUB_OUTPUT
+          echo "TARGET=$TARGET" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build for testing
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+
+          target: ${{ steps.tags.outputs.TARGET }}
+          build-args: |
+            BASE_TAG=${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
+            EXTENSIONS=${{ matrix.phpimage.extensions }}
+            PECL=${{ matrix.phpimage.pecl }}
+            PACKAGES=${{ matrix.phpimage.packages }}
+            OS=${{ matrix.phpimage.os }}
+            NODE_VERSION=${{ matrix.phpimage.node }}
+
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:test-${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
+
+      - name: Test build
+        run: scripts/test_image.sh --node="${{ matrix.phpimage.node }}" --extensions="${{ matrix.phpimage.extensions }} ${{ matrix.phpimage.pecl }}" --image="${{ env.REGISTRY }}/${{ env.IMAGE }}:test-${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.phpimage.platforms }}
+          push: true
+
+          target: ${{ steps.tags.outputs.TARGET }}
+          build-args: |
+            BASE_TAG=${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
+            EXTENSIONS=${{ matrix.phpimage.extensions }}
+            PECL=${{ matrix.phpimage.pecl }}
+            PACKAGES=${{ matrix.phpimage.packages }}
+            OS=${{ matrix.phpimage.os }}
+            NODE_VERSION=${{ matrix.phpimage.node }}
+
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.phpimage.major }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
