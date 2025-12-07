@@ -135,4 +135,3 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
             ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.phpimage.major }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}
