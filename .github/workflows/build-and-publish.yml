@@ -39,10 +39,10 @@ jobs:
       - name: Output matrix.json
         id: output-matrix
         run: |
-          matrix="$(jq -c . < matrix.json)"
-          matrix=$(echo "$matrix" | jq '
+          matrix=$(jq -c . < matrix.json)
+          matrix=$(echo "$matrix" | jq -c '
             .phpimages |= map(
-              .patchTag =
+              .tagPatch =
                 (
                   [ 
                     (.major|tostring),
@@ -55,7 +55,7 @@ jobs:
                   | join("-")
                 )
               |
-              .minorTag =
+              .tagMinor =
                 (
                   [ 
                     (.major|tostring),
