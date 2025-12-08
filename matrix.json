@@ -2,6 +2,72 @@
   "phpimages": [
     {
       "major": 8,
+      "minor": 1,
+      "patch": 33,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": ""
+    },
+    {
+      "major": 8,
+      "minor": 1,
+      "patch": 33,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": "24"
+    },
+    {
+      "major": 8,
+      "minor": 2,
+      "patch": 29,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": ""
+    },
+    {
+      "major": 8,
+      "minor": 2,
+      "patch": 29,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": "24"
+    },
+    {
+      "major": 8,
+      "minor": 3,
+      "patch": 28,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": ""
+    },
+    {
+      "major": 8,
+      "minor": 3,
+      "patch": 28,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": "24"
+    },
+    {
+      "major": 8,
       "minor": 4,
       "patch": 15,
       "variant": "fpm",
@@ -9,8 +75,18 @@
       "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
-      "node": "",
-      "platforms": "linux/amd64,linux/arm64"
+      "node": ""
+    },
+    {
+      "major": 8,
+      "minor": 4,
+      "patch": 15,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": "24"
     }
   ]
 }
