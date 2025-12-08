@@ -199,6 +199,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Create manifest from digests
         run: |
           for dir in ${{ runner.temp }}/digests/*; do
@@ -206,9 +209,6 @@ jobs:
             TAG_MINOR=$(jq -r '.tagMinor' "$dir"/*.json | head -n1)
             TAG_PATCH=$(jq -r '.tagPatch' "$dir"/*.json | head -n1)
 
-            docker manifest create "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH" $DIGESTS
-            docker manifest create "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR" $DIGESTS
-
-            docker manifest push "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH"
-            docker manifest push "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR"
+            docker buildx imagetools create --tag "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH" $DIGESTS
+            docker buildx imagetools create --tag "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR" $DIGESTS
           done
