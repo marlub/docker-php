@@ -38,7 +38,37 @@ jobs:
 
       - name: Output matrix.json
         id: output-matrix
-        run: echo "matrix=$(jq -c . < matrix.json)" >> $GITHUB_OUTPUT
+        run: |
+          matrix="$(jq -c . < matrix.json)"
+          matrix=$(echo "$matrix" | jq '
+            .phpimages |= map(
+              .patchTag =
+                (
+                  [ 
+                    (.major|tostring),
+                    (.minor|tostring),
+                    (.patch|tostring),
+                    (.variant | select(. != "")),
+                    (.os | select(. != "")),
+                    (if .node != "" then "node" + .node else empty end)
+                  ]
+                  | join("-")
+                )
+              |
+              .minorTag =
+                (
+                  [ 
+                    (.major|tostring),
+                    (.minor|tostring),
+                    (.variant | select(. != "")),
+                    (.os | select(. != "")),
+                    (if .node != "" then "node" + .node else empty end)
+                  ]
+                  | join("-")
+                )
+            )'
+          )
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
       - name: Commit matrix.json if changed
         run: |
@@ -61,11 +91,7 @@ jobs:
           - linux/amd64
           - linux/arm64
     runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' }}
-    name: ${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}-${{ matrix.platform }}
-    outputs:
-      id: ${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}
-      digest: ${{ steps.build-push.outputs.digest }}
-      platform: ${{ matrix.platform }}
+    name: Build ${{ matrix.phpimage.minorTag }} (${{ matrix.platform }})
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,12 +103,11 @@ jobs:
         id: tags
         run: |
           TAG_OS="${{ matrix.phpimage.os }}"
-          TAG_NODE="${{ matrix.phpimage.node }}"
           TARGET="php"
           if [ "$TAG_OS" != "" ]; then
             TAG_OS="-$TAG_OS"
           fi
-          if [ "$TAG_NODE" != "" ]; then
+          if [ "${{ matrix.phpimage.node }}" != "" ]; then
             TARGET="php-node"
           fi
           echo "OS=$TAG_OS" >> $GITHUB_OUTPUT
@@ -117,8 +142,8 @@ jobs:
       - name: Test build
         run: scripts/test_image.sh --node="${{ matrix.phpimage.node }}" --extensions="${{ matrix.phpimage.extensions }} ${{ matrix.phpimage.pecl }}" --image="test"
 
-      - name: Build and push
-        id: build-push
+      - name: Build and push digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -136,16 +161,37 @@ jobs:
             OS=${{ matrix.phpimage.os }}
             NODE_VERSION=${{ matrix.phpimage.node }}
 
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests/${{ matrix.phpimage.tagMinor }}
+          jq -c -n \
+            --arg platform "${{ matrix.platform }}" \
+            --arg digest "${{ steps.build.outputs.digest }}" \
+            --arg tagMinor "${{ matrix.phpimage.tagMinor }}" \
+            --arg tagPatch "${{ matrix.phpimage.tagPatch }}" \
+            '$ARGS.named' > ${{ runner.temp }}/digests/${{ matrix.phpimage.tagMinor }}/${{ strategy.job-index }}.json
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
   publish-manifest:
     runs-on: ubuntu-latest
     needs:
-      - update-matrix
       - build-and-push
-    strategy:
-      matrix:
-        phpimage: ${{ fromJson(needs.update-matrix.outputs.matrix).phpimages }}
-    name: ${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}
+    name: Publish image tags
     steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -153,37 +199,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Populate tags
-        id: tags
-        run: |
-          TAG_OS="${{ matrix.phpimage.os }}"
-          TAG_NODE="${{ matrix.phpimage.node }}"
-          if [ "$TAG_OS" != "" ]; then
-            TAG_OS="-$TAG_OS"
-          fi
-          if [ "$TAG_NODE" != "" ]; then
-            TAG_NODE="-node$TAG_NODE"
-          fi
-          echo "OS=$TAG_OS" >> $GITHUB_OUTPUT
-          echo "NODE=$TAG_NODE" >> $GITHUB_OUTPUT
-
       - name: Create manifest from digests
         run: |
-          id="${{ matrix.phpimage.major }}-${{ matrix.phpimage.minor }}-${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}-${{ matrix.phpimage.os }}-${{ matrix.phpimage.node }}"
+          for dir in ${{ runner.temp }}/digests/*; do
+            DIGESTS=$(jq -r '.digest' "${{ runner.temp }}/digests/$dir"/*.json)
+            TAG_MINOR=$(jq -r '.tagMinor' "${{ runner.temp }}/digests/$dir"/*.json | head -n1)
+            TAG_PATCH=$(jq -r '.tagPatch' "${{ runner.temp }}/digests/$dir"/*.json | head -n1)
 
-          TAG_PATCH="${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}"
-          TAG_MINOR="${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}${{ steps.tags.outputs.NODE }}"
+            docker manifest create "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH" $DIGESTS
+            docker manifest create "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR" $DIGESTS
 
-          DIGEST_AMD64=$(jq -r --arg id "$id" '.[] | select(.id==$id and .platform=="linux/amd64").digest' <<< '${{ toJson(needs.build-and-push.outputs) }}')
-          DIGEST_ARM64=$(jq -r --arg id "$id" '.[] | select(.id==$id and .platform=="linux/arm64").digest' <<< '${{ toJson(needs.build-and-push.outputs) }}')
-
-          docker manifest create "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE }}@$DIGEST_AMD64" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE }}@$DIGEST_ARM64"
-
-          docker manifest create "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE }}@$DIGEST_AMD64" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE }}@$DIGEST_ARM64"
-
-          docker manifest push "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH"
-          docker manifest push "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR"
+            docker manifest push "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH"
+            docker manifest push "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR"
+          done
