@@ -46,7 +46,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--variants", nargs="+", default=["fpm"])
     ap.add_argument("--os", nargs="+", default=["alpine"])
-    ap.add_argument("--platforms", default="linux/amd64,linux/arm64")
     ap.add_argument("--extensions", default="bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof")
     ap.add_argument("--pecl", default="")
     ap.add_argument("--packages", default="")
@@ -76,7 +75,6 @@ def main():
                             "pecl": args.pecl,
                             "packages": args.packages,
                             "node": node,
-                            "platforms": args.platforms
                         }
 
     for (major, minor, variant, os, node), entry in entries.items():
