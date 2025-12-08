@@ -46,9 +46,7 @@ jobs:
               .tagPatch =
                 (
                   [ 
-                    (.major|tostring),
-                    (.minor|tostring),
-                    (.patch|tostring),
+                    (.major|tostring) + "." + (.minor|tostring) + "." + (.patch|tostring),
                     (.variant | select(. != "")),
                     (.os | select(. != "")),
                     (if .node != "" then "node" + .node else empty end)
@@ -59,8 +57,7 @@ jobs:
               .tagMinor =
                 (
                   [ 
-                    (.major|tostring),
-                    (.minor|tostring),
+                    (.major|tostring) + "." + (.minor|tostring),
                     (.variant | select(. != "")),
                     (.os | select(. != "")),
                     (if .node != "" then "node" + .node else empty end)
