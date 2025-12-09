@@ -3,7 +3,7 @@
     {
       "major": 8,
       "minor": 1,
-      "patch": 33,
+      "patch": 32,
       "variant": "fpm",
       "os": "alpine",
       "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
@@ -14,7 +14,7 @@
     {
       "major": 8,
       "minor": 1,
-      "patch": 33,
+      "patch": 32,
       "variant": "fpm",
       "os": "alpine",
       "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",

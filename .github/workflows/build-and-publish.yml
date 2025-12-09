@@ -33,9 +33,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install requests packaging
 
-#      - name: Update matrix.json
-#        run: |
-#          python scripts/update_matrix.py
+      - name: Update matrix.json
+        run: |
+          python scripts/update_matrix.py
 
       - name: Output matrix.json
         id: output-matrix
