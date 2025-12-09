@@ -9,6 +9,20 @@ def fetch_json(url):
     return r.json()
 
 
+def parse_allow_add_version(version):
+    if version is None:
+        return None, None
+
+    m = re.match(r"^([0-9]+)\.([0-9]+)$", version)
+
+    if not m:
+        raise ValueError("Allow add version must be a minor like 8.1")
+
+    major, minor = map(int, m.groups())
+
+    return major, minor
+
+
 def parse_versions(data):
     result = {}
     for key, val in data.items():
@@ -52,11 +66,13 @@ def main():
     ap.add_argument("--node", nargs="+", default=["", "24"])
     ap.add_argument("--out", default="matrix.json")
     ap.add_argument("--source-url", default="https://raw.githubusercontent.com/docker-library/php/master/versions.json")
+    ap.add_argument("--allow-add-version", default=None)
     args = ap.parse_args()
 
     upstream = fetch_json(args.source_url)
     latest = parse_versions(upstream)
     entries = load_existing(args.out)
+    minMajor, minMinor = parse_allow_add_version(args.allow_add_version)
 
     for (major, minor), ver in latest.items():
         for variant in args.variants:
@@ -64,7 +80,7 @@ def main():
                 for node in args.node:
                     key = (major, minor, variant, os, node)
 
-                    if key not in entries:
+                    if key not in entries and minMajor is not None and major >= minMajor and minMinor is not None and minor >= minMinor:
                         entries[key] = {
                             "major": major,
                             "minor": minor,
