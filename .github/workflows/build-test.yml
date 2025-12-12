@@ -17,6 +17,11 @@ jobs:
       matrix: ${{ steps.enrich-matrix.outputs.matrix }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Enrich matrix.json
         id: enrich-matrix
         run: |
