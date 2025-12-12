@@ -6,7 +6,7 @@
       "patch": 33,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": ""
@@ -17,7 +17,7 @@
       "patch": 33,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": "24"
@@ -28,7 +28,7 @@
       "patch": 29,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": ""
@@ -39,7 +39,7 @@
       "patch": 29,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": "24"
@@ -50,7 +50,7 @@
       "patch": 28,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": ""
@@ -61,7 +61,7 @@
       "patch": 28,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": "24"
@@ -72,7 +72,7 @@
       "patch": 15,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": ""
@@ -83,7 +83,7 @@
       "patch": 15,
       "variant": "fpm",
       "os": "alpine",
-      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "extensions": "bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
       "pecl": "",
       "packages": "",
       "node": "24"

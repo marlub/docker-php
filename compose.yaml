@@ -13,6 +13,7 @@ services:
       PHP_EXTENSION_ZIP: "true"
       PHP_EXTENSION_OPCACHE: "true"
       PHP_EXTENSION_SOCKETS: "true"
+      PHP_EXTENSION_MYSQLI: "true"
       PHP_EXTENSION_PDO_PGSQL: "true"
       PHP_EXTENSION_PDO_MYSQL: "true"
       PHP_EXTENSION_REDIS: "true"
