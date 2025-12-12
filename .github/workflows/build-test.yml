@@ -9,10 +9,10 @@ on:
         default: false
         type: boolean
       registry:
-        required: false
+        required: true
         type: string
       image:
-        required: false
+        required: true
         type: string
 
 jobs:

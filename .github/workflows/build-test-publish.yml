@@ -18,6 +18,10 @@ jobs:
   update-matrix:
     name: Update matrix
     runs-on: ubuntu-latest
+    
+    outputs:
+      registry: ${{ steps.prepare_build_vars.outputs.registry }}
+      image: ${{ steps.prepare_build_vars.outputs.image }}
 
     steps:
       - name: Checkout
@@ -48,14 +52,20 @@ jobs:
             git push
           fi
 
+      - name: Prepare build variables
+        id: prepare_build_vars
+        run: |
+          echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
   build-and-test:
     name: Build
     needs: update-matrix
     uses: ./.github/workflows/build-test.yml
     with:
       publish: true
-      registry: ${{ vars.REGISTRY }}
-      image: ${{ vars.IMAGE }}
+      registry: ${{ needs.update-matrix.outputs.registry }}
+      image: ${{ needs.update-matrix.outputs.image }}
 
   publish-manifest:
     name: Publish image tags
