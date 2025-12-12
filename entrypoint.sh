@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/bin/sh
 set -e
 
 if [ ! -f /tmp/.extensions-disabled ]; then
@@ -20,4 +20,22 @@ if [ ! -f /tmp/.extensions-disabled ]; then
     done
 fi
 
-exec /usr/local/bin/docker-php-original-entrypoint "$@"
+APP_USER=$( getent passwd "${APP_UID:-0}" | cut -d : -f 1 )
+if [ -z "$APP_USER" ]; then
+    if [ -z "$APP_GID" ]; then
+       APP_GID="$APP_UID"
+    fi
+
+    if [ -f /etc/alpine-release ]; then
+        addgroup -g "$APP_GID" app && adduser -D -u "$APP_UID" app -G app
+    else
+        groupadd -g "$APP_GID" app && useradd -u "$APP_UID" app -g app
+    fi
+
+    APP_USER=app
+fi
+
+# Fix access rights for stdout and stderr
+chown $APP_USER /proc/self/fd/1 /proc/self/fd/2
+
+exec su "$APP_USER" /usr/local/bin/docker-php-original-entrypoint -- "$@"

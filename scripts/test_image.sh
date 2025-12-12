@@ -53,8 +53,8 @@ for ext in $EXTENSIONS; do
     fi
 done
 
-echo "> Test if node $NODE_VERSION is shipped and can be executed"
 if [ "$NODE_VERSION" != "" ]; then
+    echo "> Test if node $NODE_VERSION is shipped and can be executed"
     output=$(docker run --rm $IMAGE node -v)
     if echo "$output" | grep -q "v$NODE_VERSION" 2>/dev/null; then
         echo $output
@@ -62,4 +62,22 @@ if [ "$NODE_VERSION" != "" ]; then
         >&2 echo "Node version $NODE_VERSION not found!"
         exit 1
     fi
+fi
+
+echo "> Test if APP_UID=1000 can be applied"
+output=$(docker run --rm -e APP_UID=1000 $IMAGE sh -c "id -u && php-fpm -t 1>/dev/null")
+if [ "$output" = "1000" ]; then
+    echo "UID is $output"
+else
+    >&2 echo "UID test failed: $output"
+    exit 1
+fi
+
+echo "> Test default UID is untouched"
+output=$(docker run --rm $IMAGE sh -c "id -u && php-fpm -t 1>/dev/null")
+if [ "$output" = "0" ]; then
+    echo "UID is $output"
+else
+    >&2 echo "UID test failed: $output"
+    exit 1
 fi
