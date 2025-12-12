@@ -49,10 +49,13 @@ jobs:
           fi
 
   build-and-test:
+    name: Build
     needs: update-matrix
     uses: ./.github/workflows/build-test.yml
     with:
       publish: true
+      registry: ${{ vars.REGISTRY }}
+      image: ${{ vars.IMAGE }}
 
   publish-manifest:
     name: Publish image tags
