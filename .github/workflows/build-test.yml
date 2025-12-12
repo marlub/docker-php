@@ -160,3 +160,13 @@ jobs:
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
+
+  validate-build-and-test:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: ${{ cancelled() || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'failure') }}
+    steps:
+      - name: Conditionally fail required check
+        run: |
+          echo "::error Some required job has failed!"
+          exit 1
