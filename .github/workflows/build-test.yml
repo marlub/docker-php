@@ -162,6 +162,7 @@ jobs:
           retention-days: 1
 
   validate-build-and-test:
+    name: Validate
     runs-on: ubuntu-latest
     needs: build-and-test
     if: ${{ cancelled() || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'failure') }}
