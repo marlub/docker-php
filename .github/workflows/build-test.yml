@@ -1,0 +1,8 @@
+name: Test PHP images with extensions
+
+on:
+    pull_request:
+
+jobs:
+    build-and-test:
+        uses: ./.github/workflows/build-test-publish.yml
