@@ -59,7 +59,7 @@ jobs:
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
   build-and-test:
-    name: Build
+    name: Build and test
     needs: update-matrix
     uses: ./.github/workflows/build-test.yml
     with:
