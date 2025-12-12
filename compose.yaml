@@ -2,6 +2,8 @@ services:
   php:
     image: ghcr.io/marlub/php:8.4-fpm-alpine
     environment:
+      APP_UID: 1000
+      APP_GID: 1000
       PHP_EXTENSION_BCMATH: "true"
       PHP_EXTENSION_GD: "true"
       PHP_EXTENSION_EXIF: "true"
@@ -15,3 +17,6 @@ services:
       PHP_EXTENSION_PDO_MYSQL: "true"
       PHP_EXTENSION_REDIS: "true"
       PHP_EXTENSION_AMQP: "true"
+      PHP_EXTENSION_XDEBUG: "false"
+      PHP_EXTENSION_PCOV: "false"
+      PHP_EXTENSION_XHPROF: "false"
