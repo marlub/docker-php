@@ -60,7 +60,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--variants", nargs="+", default=["fpm"])
     ap.add_argument("--os", nargs="+", default=["alpine"])
-    ap.add_argument("--extensions", default="bcmath gd exif intl calendar ldap zip opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof")
+    ap.add_argument("--extensions", default="bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof")
     ap.add_argument("--pecl", default="")
     ap.add_argument("--packages", default="")
     ap.add_argument("--node", nargs="+", default=["", "24"])
