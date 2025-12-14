@@ -87,6 +87,28 @@
       "pecl": "",
       "packages": "",
       "node": "24"
+    },
+    {
+      "major": 8,
+      "minor": 5,
+      "patch": 0,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": ""
+    },
+    {
+      "major": 8,
+      "minor": 5,
+      "patch": 0,
+      "variant": "fpm",
+      "os": "alpine",
+      "extensions": "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+      "pecl": "",
+      "packages": "",
+      "node": "24"
     }
   ]
 }
