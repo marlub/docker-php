@@ -40,6 +40,8 @@ RUN set -eux; \
         docker-php-ext-enable $PECL; \
     fi;
 
+RUN cp /usr/local/etc/php/php.ini-production /usr/local/etc/php/php.ini
+
 RUN mv /usr/local/bin/docker-php-entrypoint /usr/local/bin/docker-php-original-entrypoint
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/docker-php-entrypoint
 
