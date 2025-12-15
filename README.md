@@ -3,7 +3,7 @@ Adding common PHP extensions to some of the official PHP Docker images.
 
 ## 🐳 Image variants
 
-All minor versions and the latest patch of each minor image tag are daily updated. The  default php.ini is based on php.ini-production
+All minor versions and the latest patch of each minor image tag are daily updated. EOL versions are not supported or updated at all. The default php.ini is based on php.ini-production
 
 | ⚙️ PHP version | ✨ Image variants |
 | -------------- | ------------------ |
