@@ -17,6 +17,8 @@ on:
         required: true
         type: string
 
+permissions: {}
+
 jobs:
   enrich-matrix:
     name: Enrich matrix
