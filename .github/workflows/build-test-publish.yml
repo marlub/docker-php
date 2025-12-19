@@ -22,6 +22,7 @@ jobs:
     outputs:
       registry: ${{ steps.prepare_build_vars.outputs.registry }}
       image: ${{ steps.prepare_build_vars.outputs.image }}
+      matrix: ${{ steps.prepare_build_vars.outputs.matrix }}
 
     steps:
       - name: Authenticate as GH Action Admin
@@ -65,15 +66,17 @@ jobs:
         run: |
           echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "matrix=$(jq -c . < matrix.json)" >> $GITHUB_OUTPUT
 
   build-and-test:
     name: Build and test
     needs: update-matrix
-    uses: ./.github/workflows/build-test.yml
+    uses: ./.github/workflows/template-images.yml
     with:
       publish: true
       registry: ${{ needs.update-matrix.outputs.registry }}
       image: ${{ needs.update-matrix.outputs.image }}
+      matrix: ${{ needs.update-matrix.outputs.matrix }}
 
   publish-manifest:
     name: Publish image tags
