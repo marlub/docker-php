@@ -81,7 +81,10 @@ jobs:
   publish-manifest:
     name: Publish image tags
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs:
+      - update-matrix
+      - build-and-test
+    if: "always() && (needs.update-matrix.result == 'success')"
     steps:
       - name: Download digests
         uses: actions/download-artifact@v7
@@ -101,12 +104,27 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Create manifest from digests
+        env:
+          MATRIX: ${{ needs.update-matrix.outputs.matrix }}
         run: |
+          IMAGES_TAGGED=0
           for dir in ${{ runner.temp }}/digests/*; do
-            DIGESTS=$(jq -r '.digest' "$dir"/*.json)
-            TAG_MINOR=$(jq -r '.tagMinor' "$dir"/*.json | head -n1)
-            TAG_PATCH=$(jq -r '.tagPatch' "$dir"/*.json | head -n1)
+            ARTIFACTS_COUNT=$(ls -1 "$dir" | wc -l)
+            if [ "$ARTIFACTS_COUNT" = "2" ]; then
+              ((++IMAGES_TAGGED))
+              DIGESTS=$(jq -r '.digest' "$dir"/*.json)
+              TAG_MINOR=$(jq -r '.tagMinor' "$dir"/*.json | head -n1)
+              TAG_PATCH=$(jq -r '.tagPatch' "$dir"/*.json | head -n1)
 
-            docker buildx imagetools create --tag "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH" $DIGESTS
-            docker buildx imagetools create --tag "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR" $DIGESTS
+              docker buildx imagetools create --tag "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_PATCH" $DIGESTS
+              docker buildx imagetools create --tag "${{ env.REGISTRY }}/${{ env.IMAGE }}:$TAG_MINOR" $DIGESTS
+            else
+              echo "The artifacts count $ARTIFACTS_COUNT is invalid for: $dir"
+            fi
           done
+
+          IMAGE_VARIANTS=$(echo "$MATRIX" | jq '.[] | length')
+          echo "$IMAGES_TAGGED / $IMAGE_VARIANTS images are tagged"
+          if [ "$IMAGES_TAGGED" != "$IMAGE_VARIANTS" ]; then
+            exit 1
+          fi
