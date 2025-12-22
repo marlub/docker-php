@@ -7,7 +7,7 @@ All minor versions and the latest patch of each minor image tag are daily update
 
 | ⚙️ PHP version | ✨ Image variants |
 | -------------- | ------------------ |
-| 8.5 | Not all of the extensions are compatible yet |
+| 8.5 | ghcr.io/marlub/php:8.5-fpm-alpine<br>ghcr.io/marlub/php:8.5-fpm-alpine-node24 |
 | 8.4 | ghcr.io/marlub/php:8.4-fpm-alpine<br>ghcr.io/marlub/php:8.4-fpm-alpine-node24 |
 | 8.3 | ghcr.io/marlub/php:8.3-fpm-alpine<br>ghcr.io/marlub/php:8.3-fpm-alpine-node24 |
 | 8.2 | ghcr.io/marlub/php:8.2-fpm-alpine<br>ghcr.io/marlub/php:8.2-fpm-alpine-node24 |
@@ -18,6 +18,10 @@ All minor versions and the latest patch of each minor image tag are daily update
 bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof
 ```
 All extensions are disabled by default, so new extensions can be added anytime without the risk of breaking setups. You can enable extensions with environment variables prefixed with `PHP_EXTENSION_[NAME]`, for example `PHP_EXTENSION_INTL=true`.
+
+### Customizations
+- With PHP 8.5 opcache is shipped by the official image and no longer managed by this one.
+- amqp is compiled from source for PHP 8.5 until a pecl version is released.
 
 ### All extension environment variables
 ```
