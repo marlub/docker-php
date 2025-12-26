@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Authenticate as GH Action Admin
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         id: app-token
         with:
           app-id: ${{ vars.GH_ACTIONS_ADMIN_APP_ID }}
