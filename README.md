@@ -21,7 +21,6 @@ All extensions are disabled by default, so new extensions can be added anytime w
 
 ### Customizations
 - With PHP 8.5 opcache is shipped by the official image and no longer managed by this one.
-- amqp is compiled from source for PHP 8.5 until a pecl version is released.
 
 ### All extension environment variables
 ```
