@@ -17,12 +17,6 @@ RUN set -eux; \
     echo "Core extensions:  $EXTENSIONS"; \
     echo "PECL extensions:  $PECL"; \
     echo "System packages:  $PACKAGES"; \
-    PHP_MAJOR_VERSION=$(php -r "echo PHP_MAJOR_VERSION;"); \
-    PHP_MINOR_VERSION=$(php -r "echo PHP_MINOR_VERSION;"); \
-    #========== Custom patches ==========#
-    if [ "8.5" = "$PHP_MAJOR_VERSION.$PHP_MINOR_VERSION" ]; then \
-        EXTENSIONS=${EXTENSIONS//"amqp"/"php-amqp/php-amqp@3ea6d56"}; \
-    fi; \
     \
     #========== System package installation ==========#
     if [ -n "$PACKAGES" ]; then \
