@@ -1,4 +1,4 @@
-# docker-php ⚠️ BETA - breaking changes possible
+# docker-php
 Adding common PHP extensions to some of the official PHP Docker images.
 
 ## 🐳 Image variants
