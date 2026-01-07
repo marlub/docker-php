@@ -11,7 +11,6 @@ All minor versions and the latest patch of each minor image tag are daily update
 | 8.4 | ghcr.io/marlub/php:8.4-fpm-alpine<br>ghcr.io/marlub/php:8.4-fpm-alpine-node24 |
 | 8.3 | ghcr.io/marlub/php:8.3-fpm-alpine<br>ghcr.io/marlub/php:8.3-fpm-alpine-node24 |
 | 8.2 | ghcr.io/marlub/php:8.2-fpm-alpine<br>ghcr.io/marlub/php:8.2-fpm-alpine-node24 |
-| 8.1 | ghcr.io/marlub/php:8.1-fpm-alpine<br>ghcr.io/marlub/php:8.1-fpm-alpine-node24 |
 
 ## 🧬 Extensions added on top of the official PHP images
 ```
