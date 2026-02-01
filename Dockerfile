@@ -31,7 +31,7 @@ RUN set -eux; \
     \
     #========== PHP extensions ==========#
     if [ -n "$EXTENSIONS" ]; then \
-        install-php-extensions $EXTENSIONS; \
+        install-php-extensions @composer $EXTENSIONS; \
     fi; \
     \
     #========== PECL extensions ==========#
