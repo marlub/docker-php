@@ -95,7 +95,7 @@ jobs:
           echo "TARGET=$TARGET" >> $GITHUB_OUTPUT
 
       - name: Build for testing
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -127,7 +127,7 @@ jobs:
       - name: Build and push digest
         if: ${{ inputs.publish }}
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
