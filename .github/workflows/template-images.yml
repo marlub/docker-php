@@ -5,7 +5,6 @@ on:
     inputs:
       publish:
         required: true
-        default: false
         type: boolean
       registry:
         required: true
@@ -16,83 +15,29 @@ on:
       matrix:
         required: true
         type: string
+      source-ref:
+        required: true
+        type: string
 
 jobs:
-  enrich-matrix:
-    name: Enrich matrix
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.enrich-matrix.outputs.matrix }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Enrich matrix
-        id: enrich-matrix
-        env:
-          MATRIX: ${{ inputs.matrix }}
-        run: |
-          matrix=$(echo "$MATRIX" | jq -c '
-            .phpimages |= map(
-              .tagPatch =
-                (
-                  [ 
-                    (.major|tostring) + "." + (.minor|tostring) + "." + (.patch|tostring),
-                    (.variant | select(. != "")),
-                    (.os | select(. != "")),
-                    (if .node != "" then "node" + .node else empty end)
-                  ]
-                  | join("-")
-                )
-              |
-              .tagMinor =
-                (
-                  [ 
-                    (.major|tostring) + "." + (.minor|tostring),
-                    (.variant | select(. != "")),
-                    (.os | select(. != "")),
-                    (if .node != "" then "node" + .node else empty end)
-                  ]
-                  | join("-")
-                )
-            )'
-          )
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
-
   build-and-test:
     name: ${{ matrix.phpimage.tagMinor }} (${{ matrix.platform }})
     runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' }}
-    needs: enrich-matrix
     strategy:
       fail-fast: false
       matrix:
-        phpimage: ${{ fromJson(needs.enrich-matrix.outputs.matrix).phpimages }}
+        phpimage: ${{ fromJson(inputs.matrix).phpimages }}
         platform:
           - linux/amd64
           - linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref }}
 
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Populate tags
-        id: tags
-        run: |
-          TAG_OS="${{ matrix.phpimage.os }}"
-          TARGET="php"
-          if [ "$TAG_OS" != "" ]; then
-            TAG_OS="-$TAG_OS"
-          fi
-          if [ "${{ matrix.phpimage.node }}" != "" ]; then
-            TARGET="php-node"
-          fi
-          echo "OS=$TAG_OS" >> $GITHUB_OUTPUT
-          echo "TARGET=$TARGET" >> $GITHUB_OUTPUT
 
       - name: Build for testing
         uses: docker/build-push-action@v7
@@ -101,10 +46,18 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           load: true
-          target: ${{ steps.tags.outputs.TARGET }}
+          no-cache: true
+          target: ${{ matrix.phpimage.node != '' && 'php-node' || 'php' }}
 
+          labels: ${{ matrix.phpimage.build_labels }}
           build-args: |
-            BASE_TAG=${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}
+            PHP_BASE_IMAGE=${{ matrix.phpimage.resolved.php_images[matrix.platform] }}
+            NODE_BASE_IMAGE=${{ matrix.phpimage.resolved.node_images[matrix.platform] }}
+            INSTALLER_URL=${{ matrix.phpimage.resolved.installer_url }}
+            INSTALLER_SHA256=${{ matrix.phpimage.resolved.installer_sha256 }}
+            COMPOSER_VERSION=${{ matrix.phpimage.resolved.composer_version }}
+            EXTENSIONS_INSTALL=${{ matrix.phpimage.resolved.extensions_install }}
+            PECL_INSTALL=${{ matrix.phpimage.resolved.pecl_install }}
             EXTENSIONS=${{ matrix.phpimage.extensions }}
             PECL=${{ matrix.phpimage.pecl }}
             PACKAGES=${{ matrix.phpimage.packages }}
@@ -114,7 +67,14 @@ jobs:
           tags: test
 
       - name: Test build
-        run: scripts/test_image.sh --node="${{ matrix.phpimage.node }}" --extensions="${{ matrix.phpimage.extensions }} ${{ matrix.phpimage.pecl }}" --image="test"
+        env:
+          NODE: ${{ matrix.phpimage.node }}
+          EXTENSIONS: ${{ matrix.phpimage.extensions }} ${{ matrix.phpimage.pecl }}
+          BUILD_INPUTS: ${{ matrix.phpimage.build_inputs }}
+          FINGERPRINT: ${{ matrix.phpimage.fingerprint }}
+        run: |
+          scripts/test_image.sh --node="$NODE" --extensions="$EXTENSIONS" --image=test
+          python3 scripts/verify_image.py --image test --inputs "$BUILD_INPUTS" --fingerprint "$FINGERPRINT"
 
       - name: Log in to GHCR
         if: ${{ inputs.publish }}
@@ -132,12 +92,19 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
-          target: ${{ steps.tags.outputs.TARGET }}
+          target: ${{ matrix.phpimage.node != '' && 'php-node' || 'php' }}
           tags: ${{ inputs.registry }}/${{ inputs.image }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
 
+          labels: ${{ matrix.phpimage.build_labels }}
           build-args: |
-            BASE_TAG=${{ matrix.phpimage.major }}.${{ matrix.phpimage.minor }}.${{ matrix.phpimage.patch }}-${{ matrix.phpimage.variant }}${{ steps.tags.outputs.OS }}
+            PHP_BASE_IMAGE=${{ matrix.phpimage.resolved.php_images[matrix.platform] }}
+            NODE_BASE_IMAGE=${{ matrix.phpimage.resolved.node_images[matrix.platform] }}
+            INSTALLER_URL=${{ matrix.phpimage.resolved.installer_url }}
+            INSTALLER_SHA256=${{ matrix.phpimage.resolved.installer_sha256 }}
+            COMPOSER_VERSION=${{ matrix.phpimage.resolved.composer_version }}
+            EXTENSIONS_INSTALL=${{ matrix.phpimage.resolved.extensions_install }}
+            PECL_INSTALL=${{ matrix.phpimage.resolved.pecl_install }}
             EXTENSIONS=${{ matrix.phpimage.extensions }}
             PECL=${{ matrix.phpimage.pecl }}
             PACKAGES=${{ matrix.phpimage.packages }}
@@ -146,14 +113,23 @@ jobs:
 
       - name: Export digest
         if: ${{ inputs.publish }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG_MINOR: ${{ matrix.phpimage.tagMinor }}
+          TAG_PATCH: ${{ matrix.phpimage.tagPatch }}
+          FINGERPRINT: ${{ matrix.phpimage.fingerprint }}
+          BUILD_INPUTS: ${{ matrix.phpimage.build_inputs }}
         run: |
-          mkdir -p ${{ runner.temp }}/digests/${{ matrix.phpimage.tagMinor }}
+          mkdir -p "$RUNNER_TEMP/digests/$TAG_MINOR"
           jq -c -n \
-            --arg platform "${{ matrix.platform }}" \
-            --arg digest "${{ steps.build.outputs.digest }}" \
-            --arg tagMinor "${{ matrix.phpimage.tagMinor }}" \
-            --arg tagPatch "${{ matrix.phpimage.tagPatch }}" \
-            '$ARGS.named' > ${{ runner.temp }}/digests/${{ matrix.phpimage.tagMinor }}/${{ strategy.job-index }}.json
+            --arg platform "$PLATFORM" \
+            --arg digest "$DIGEST" \
+            --arg tagMinor "$TAG_MINOR" \
+            --arg tagPatch "$TAG_PATCH" \
+            --arg fingerprint "$FINGERPRINT" \
+            --arg build_inputs "$BUILD_INPUTS" \
+            '$ARGS.named' > "$RUNNER_TEMP/digests/$TAG_MINOR/${{ strategy.job-index }}.json"
 
       - name: Upload digest
         if: ${{ inputs.publish }}

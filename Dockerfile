@@ -1,19 +1,29 @@
 ARG BASE_TAG="8.4-fpm-alpine"
 ARG NODE_VERSION=""
 ARG OS="alpine"
+ARG PHP_BASE_IMAGE="php:${BASE_TAG}"
+ARG NODE_BASE_IMAGE="node:${NODE_VERSION:-24}-${OS:-slim}"
 
-FROM php:${BASE_TAG} AS php
+FROM ${PHP_BASE_IMAGE} AS php
 
 ARG EXTENSIONS=""
 ARG PECL=""
 ARG PACKAGES=""
+ARG EXTENSIONS_INSTALL=""
+ARG PECL_INSTALL=""
+ARG COMPOSER_VERSION=""
+ARG INSTALLER_URL="https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions"
+ARG INSTALLER_SHA256=""
 
 ENV EXTENSIONS="${EXTENSIONS}"
 ENV PECL="${PECL}"
 
-ADD --chmod=0755 https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+ADD --chmod=0755 ${INSTALLER_URL} /usr/local/bin/install-php-extensions
 
 RUN set -eux; \
+    if [ -n "$INSTALLER_SHA256" ]; then \
+        printf '%s  %s\n' "$INSTALLER_SHA256" /usr/local/bin/install-php-extensions | sha256sum -c -; \
+    fi; \
     echo "Core extensions:  $EXTENSIONS"; \
     echo "PECL extensions:  $PECL"; \
     echo "System packages:  $PACKAGES"; \
@@ -31,12 +41,12 @@ RUN set -eux; \
     \
     #========== PHP extensions ==========#
     if [ -n "$EXTENSIONS" ]; then \
-        install-php-extensions @composer $EXTENSIONS; \
+        install-php-extensions "@composer${COMPOSER_VERSION:+-$COMPOSER_VERSION}" ${EXTENSIONS_INSTALL:-$EXTENSIONS}; \
     fi; \
     \
     #========== PECL extensions ==========#
     if [ -n "$PECL" ]; then \
-        pecl install --onlyreqdeps --force $PECL; \
+        pecl install --onlyreqdeps --force ${PECL_INSTALL:-$PECL}; \
         docker-php-ext-enable $PECL; \
     fi;
 
@@ -45,7 +55,7 @@ RUN cp /usr/local/etc/php/php.ini-production /usr/local/etc/php/php.ini
 RUN mv /usr/local/bin/docker-php-entrypoint /usr/local/bin/docker-php-original-entrypoint
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/docker-php-entrypoint
 
-FROM node:${NODE_VERSION:-24}-${OS:-slim} AS node
+FROM ${NODE_BASE_IMAGE:-node:24-alpine} AS node
 
 FROM php AS php-node
 

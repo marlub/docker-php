@@ -3,7 +3,9 @@ Adding common PHP extensions to some of the official PHP Docker images.
 
 ## 🐳 Image variants
 
-All minor versions and the latest patch of each minor image tag are daily updated. EOL versions are not supported or updated at all. The default php.ini is based on php.ini-production
+PHP, extension, Composer, and Node.js updates are checked daily. Affected image variants are rebuilt and published when updates are available. End-of-life PHP versions are not supported or updated.
+
+Images support `linux/amd64` and `linux/arm64`. The default `php.ini` is based on `php.ini-production`.
 
 | ⚙️ PHP version | ✨ Image variants |
 | -------------- | ------------------ |
