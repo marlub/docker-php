@@ -1,499 +1,565 @@
 import copy
-import csv
-import io
+import hashlib
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
-import tarfile
-import xml.etree.ElementTree as ET
+import textwrap
 import unittest
-from unittest.mock import Mock, patch
-from urllib.error import HTTPError, URLError
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / 'scripts'))
+from select_images import (PLATFORMS, REVISION_LABEL, VARIANT_LABEL, ResolutionError,
+                           affected_tags, check_current, git, manifests, select)
+from verify_image import verify, verify_metadata
 
-from select_images import (
-    FINGERPRINT_LABEL, HTTP, INPUTS_LABEL, PLATFORMS, Registry, ResolutionError,
-    Resolver, SOURCE_FILES, PIE_API, PIE_PACKAGES, PIE_OPTIONS, PieRunner, XHPROF_API,
-    canonical, compatible_php, parse_pie_info, select, selection_reason, sha256, tags,
-    main as select_main,
-)
-from publish_images import publish, publish_variant, validated_digests
-from verify_image import verify
-
-
-IMAGE = "ghcr.io/marlub/php"
-PIE_URL = "https://github.com/php/pie/releases/download/1.5.3/pie.phar"
-COMPOSER_URL = "https://getcomposer.org/download/2.9.0/composer.phar"
-ENTRY = {
-    "major": 8, "minor": 4, "patch": 17, "variant": "fpm", "os": "alpine",
-    "extensions": "bcmath redis", "packages": "", "node": "",
-}
+IMAGE = 'example.test/php'
 
 
 def digest(value):
-    return "sha256:" + sha256(value.encode())
+    return 'sha256:' + hashlib.sha256(value.encode()).hexdigest()
 
 
-def manifest(name, platforms=PLATFORMS):
-    return {"digest": digest(name), "manifests": [
-        {"digest": digest(name + platform), "platform": dict(zip(("os", "architecture"), platform.split("/")))}
-        for platform in platforms
-    ]}
-
-
-class FakeRegistry(Registry):
-    def __init__(self):
-        self.values = {}
-
-    def inspect(self, reference, field="Manifest", missing_ok=False):
-        key = (reference, field)
-        if key not in self.values:
-            if missing_ok:
-                return None
-            raise ResolutionError("Unexpected registry request: " + str(key))
-        return copy.deepcopy(self.values[key])
-
-    def published(self, entry, name="published", platforms=PLATFORMS):
-        index = manifest(name, platforms)
-        for tag in ("tagMinor", "tagPatch"):
-            self.values[(f'{IMAGE}:{entry[tag]}', "Manifest")] = index
-        for platform in platforms:
-            self.values[(f'{IMAGE}@{digest(name + platform)}', "Image")] = {
-                **dict(zip(("os", "architecture"), platform.split("/"))),
-                "config": {"Labels": {
-                    FINGERPRINT_LABEL: entry["fingerprint"], INPUTS_LABEL: entry["build_inputs"],
-                }},
-            }
-
-
-class ImageTests(unittest.TestCase):
+class RepositoryTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        for name in SOURCE_FILES:
-            path = self.root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(name)
-        self.registry = FakeRegistry()
-        for base in ("php:8.4.17-fpm-alpine", "php:8.4.18-fpm-alpine", "node:24-alpine"):
-            self.registry.values[(base, "Manifest")] = manifest(base)
-        self.http = HTTP()
-        self.http.cache = {
-            PIE_API: canonical({"tag_name": "1.5.3", "assets": [{"name": "pie.phar", "browser_download_url": PIE_URL}]}).encode(),
-            PIE_URL: b"pie contents",
-            "https://getcomposer.org/versions": b'{"stable":[{"version":"2.9.0","min-php":70205},{"version":"2.2.0","min-php":50300}]}',
-            COMPOSER_URL: b"composer contents",
-            COMPOSER_URL + ".sha256sum": sha256(b"composer contents").encode(),
-            COMPOSER_URL.replace("2.9.0", "2.9.1"): b"new composer",
-            COMPOSER_URL.replace("2.9.0", "2.9.1") + ".sha256sum": sha256(b"new composer").encode(),
-        }
-        self.pie_versions = {"redis": "6.1.0", "amqp": "2.2.0", "xdebug": "3.5.3", "pcov": "1.0.12"}
-        self.pie_runner = Mock()
-        def info(images, pie_bytes, package):
-            name = next(name for name, value in PIE_PACKAGES.items() if value == package)
-            return f"Extension name: {name}\nComposer package name: {package}\nVersion: {self.pie_versions[name]}\n"
-        self.pie_runner.info.side_effect = info
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for name in ('build', 'scripts', '.github'):
+            shutil.copytree(ROOT / name, self.root / name, ignore=shutil.ignore_patterns('__pycache__'))
+        for name in ('Dockerfile', 'entrypoint.sh', 'README.md', 'renovate.json'):
+            shutil.copy(ROOT / name, self.root / name)
+        self.git('init', '-q', '-b', 'main')
+        self.git('config', 'user.email', 'test@example.test')
+        self.git('config', 'user.name', 'Test')
+        self.git('config', 'core.hooksPath', '/dev/null')
+        self.git('remote', 'add', 'origin', '.')
+        self.base = self.commit()
 
-    def resolver(self):
-        return Resolver(self.http, self.registry, self.root, self.pie_runner)
+    def git(self, *args):
+        return git(self.root, *args).strip()
 
-    def resolved(self, **changes):
-        return self.resolver().resolve({**ENTRY, **changes})
+    def commit(self):
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'fixture change')
+        return self.git('rev-parse', 'HEAD')
 
-    def artifact_directory(self, entry, platforms=PLATFORMS):
-        directory = self.root / "digests" / entry["tagMinor"]
-        directory.mkdir(parents=True)
-        for index, platform in enumerate(platforms):
-            artifact = {key: entry[key] for key in ("tagMinor", "tagPatch", "fingerprint", "build_inputs")}
-            artifact.update(platform=platform, digest=digest("published" + platform))
-            (directory / f"{index}.json").write_text(canonical(artifact))
-        return directory
+    def entries(self):
+        return manifests(self.root)
 
-    def test_tags_and_pins_preserve_runtime_names(self):
-        entry = self.resolved()
-        self.assertEqual(tags(ENTRY), ("8.4-fpm-alpine", "8.4.17-fpm-alpine"))
-        self.assertEqual(entry["extensions"], "bcmath redis")
-        self.assertEqual(entry["resolved"]["extensions_install"], "bcmath")
-        self.assertEqual(entry["resolved"]["composer"]["version"], "2.9.0")
-        self.assertEqual(entry["resolved"]["pie"]["sha256"], sha256(b"pie contents"))
-        self.assertTrue(entry["resolved"]["php_images"]["linux/amd64"].startswith("php@sha256:"))
-        self.assertEqual(entry["resolved"]["node_images"], {})
+    def change_json(self, name, change):
+        path = self.root / name
+        value = json.loads(path.read_text())
+        change(value)
+        path.write_text(json.dumps(value))
 
-    def test_action_labels_preserve_json_quotes_and_commas(self):
-        entry = self.resolved()
-        labels = [row[0] for row in csv.reader(io.StringIO(entry["build_labels"]))]
-        self.assertEqual(labels, [FINGERPRINT_LABEL + "=" + entry["fingerprint"],
-                                  INPUTS_LABEL + "=" + entry["build_inputs"]])
+    def change_node(self):
+        path = self.root / 'Dockerfile'
+        path.write_text(re.sub(r'node:24\.\d+\.\d+-', 'node:24.999.0-', path.read_text()))
 
-    def test_action_build_argument_preserves_configure_option_array_quotes(self):
-        entry = self.resolved()
-        argument = list(csv.reader(io.StringIO(entry["dependency_build_arg"])))
-        self.assertEqual(argument, [["DEPENDENCIES=" + entry["dependencies"]]])
-        dependencies = json.loads(argument[0][0].split("=", 1)[1])
-        self.assertEqual(dependencies["pie_packages"]["redis"]["configure_options"], PIE_OPTIONS["redis"])
+    def affected(self, change):
+        before = self.git('rev-parse', 'HEAD')
+        change()
+        self.commit()
+        return sorted(affected_tags(self.entries(), self.root, before))
 
-    def test_unchanged_run_selects_nothing(self):
-        self.registry.published(self.resolved())
-        selected, report = select([ENTRY], self.resolver(), self.registry, IMAGE)
-        self.assertEqual(selected, {"phpimages": []})
-        self.assertEqual(report[0]["reason"], "unchanged")
 
-    def test_previous_snapshot_schema_triggers_rebuild(self):
-        entry = self.resolved()
-        self.registry.published(entry)
-        inputs = json.loads(entry["build_inputs"])
-        inputs["schema"] = 1
-        for platform in PLATFORMS:
-            labels = self.registry.values[(f'{IMAGE}@{digest("published" + platform)}', "Image")]["config"]["Labels"]
-            labels[INPUTS_LABEL] = canonical(inputs)
-            labels[FINGERPRINT_LABEL] = sha256(labels[INPUTS_LABEL].encode())
-        self.assertIn("schema", selection_reason(entry, self.registry, IMAGE))
 
-    def test_noop_cli_emits_empty_matrix_and_false_output(self):
-        self.registry.published(self.resolved())
-        matrix = self.root / "matrix.json"
-        matrix.write_text(canonical({"phpimages": [ENTRY]}))
-        output = self.root / "output"
-        selected = self.root / "selected.json"
-        args = ["select_images.py", "--matrix", str(matrix), "--out", str(selected),
-                "--github-output", str(output)]
-        with patch("sys.argv", args), patch("select_images.Resolver", return_value=self.resolver()), \
-                patch("select_images.Registry", return_value=self.registry), patch("builtins.print"):
-            self.assertEqual(select_main(), 0)
-        self.assertEqual(json.loads(selected.read_text()), {"phpimages": []})
-        self.assertIn("has_changes=false\n", output.read_text())
-        self.assertEqual(len(output.read_text().splitlines()), 2)
+class SelectionTests(RepositoryTests):
+    def test_eight_variants_and_existing_tags(self):
+        entries = self.entries()
+        self.assertEqual(len(entries), 8)
+        self.assertEqual(entries[0]['tagMinor'], '8.2-fpm-alpine')
+        self.assertEqual(entries[-1]['tagMinor'], '8.5-fpm-alpine-node24')
+        self.assertEqual(entries[0]['tagPatch'], entries[0]['php_version'] + '-fpm-alpine')
+        self.assertNotIn('opcache', entries[-1]['extensions'].split())
+        self.assertEqual(entries[0]['source_ref'], self.base)
+        self.assertNotIn('input_hash', entries[0])
+        self.assertNotIn('inputs', entries[0])
 
-    def test_forced_selection_ignores_published_state(self):
-        self.registry.published(self.resolved())
-        selected, report = select([ENTRY], self.resolver(), self.registry, IMAGE, select_all=True)
-        self.assertEqual(len(selected["phpimages"]), 1)
-        self.assertTrue(report[0]["selected"])
+    def test_no_changes_select_nothing_without_registry(self):
+        result = select(self.entries(), self.root, self.base)
+        self.assertEqual(result['phpimages'], [])
+        self.assertTrue(all(row['state'] == 'Not selected' for row in result['report']))
 
-    def test_missing_tag_selects_first_build(self):
-        self.assertEqual(selection_reason(self.resolved(), self.registry, IMAGE), "published tag missing")
+    def test_php_specific_updates(self):
+        for minor in ('8.2', '8.3', '8.4', '8.5'):
+            with self.subTest(minor=minor):
+                changed = self.affected(lambda: self.change_json(f'build/php/{minor}.json', lambda c: c['pie_packages']['redis'].update(version='6.3.1')))
+                self.assertEqual(changed, [minor + '-fpm-alpine', minor + '-fpm-alpine-node24'])
 
-    def test_mismatched_tags_are_retried(self):
-        entry = self.resolved()
-        self.registry.published(entry)
-        self.registry.values[(f'{IMAGE}:{entry["tagPatch"]}', "Manifest")] = manifest("older")
-        self.assertEqual(selection_reason(entry, self.registry, IMAGE), "minor and patch tags differ")
+    def test_php_base_digest_and_xhprof_update(self):
+        for field in ('base', 'xhprof'):
+            def change():
+                self.change_json('build/php/8.3.json', lambda c: c.update(image=c['image'].split('@')[0] + '@' + digest('new')) if field == 'base' else c['xhprof'].update(commit='a' * 40))
+            self.assertEqual(len(self.affected(change)), 2)
 
-    def test_missing_architecture_is_retried(self):
-        entry = self.resolved()
-        self.registry.published(entry, platforms=("linux/amd64",))
-        self.assertIn("platform missing", selection_reason(entry, self.registry, IMAGE))
+    def test_formatting_only_manifest_change_selects_minor(self):
+        changed = self.affected(lambda: self.change_json('build/php/8.2.json', lambda c: None))
+        self.assertEqual(len(changed), 2)
 
-    def test_missing_and_corrupt_labels_are_retried(self):
-        entry = self.resolved()
-        for labels in ({}, {FINGERPRINT_LABEL: entry["fingerprint"], INPUTS_LABEL: "invalid"}):
-            with self.subTest(labels=labels):
-                self.registry.published(entry)
-                self.registry.values[(f'{IMAGE}@{digest("publishedlinux/arm64")}', "Image")]["config"]["Labels"] = labels
-                self.assertIsNotNone(selection_reason(entry, self.registry, IMAGE))
+    def test_node_pin_and_stage_changes_select_only_node(self):
+        changed = self.affected(self.change_node)
+        self.assertEqual(len(changed), 4)
+        self.assertTrue(all('node24' in tag for tag in changed))
+        path = self.root / 'Dockerfile'
+        changed = self.affected(lambda: path.write_text(path.read_text().replace('RUN ln -vs', 'RUN ln -vfs')))
+        self.assertEqual(len(changed), 4)
 
-    def test_same_tag_base_digest_change_selects_variant(self):
-        self.registry.published(self.resolved())
-        self.registry.values[("php:8.4.17-fpm-alpine", "Manifest")] = manifest("updated-base")
-        self.assertIsNotNone(selection_reason(self.resolved(), self.registry, IMAGE))
+    def test_unknown_dockerfile_structure_selects_all(self):
+        changed = self.affected(lambda: (self.root / 'Dockerfile').write_text((self.root / 'Dockerfile').read_text() + '\nFROM php AS other\n'))
+        self.assertEqual(len(changed), 8)
 
-    def test_unrelated_platform_and_index_metadata_do_not_change_fingerprint(self):
-        before = self.resolved()
-        index = self.registry.values[("php:8.4.17-fpm-alpine", "Manifest")]
-        index["digest"] = digest("other-index")
-        index["manifests"].extend(manifest("extra", ("linux/s390x",))["manifests"])
-        self.assertEqual(before["fingerprint"], self.resolved()["fingerprint"])
+    def test_shared_sources_workflows_and_tests_select_all(self):
+        for filename in ('entrypoint.sh', 'scripts/install_extensions.sh', 'scripts/refresh_apk_locks.py', '.github/workflows/template-images.yml', 'Dockerfile', 'tests/new_test.py'):
+            with self.subTest(filename=filename):
+                path = self.root / filename
+                path.parent.mkdir(exist_ok=True)
+                self.assertEqual(len(self.affected(lambda: path.write_text('# change\n' + (path.read_text() if path.exists() else '')))), 8)
 
-    def test_node_change_affects_only_node_variants(self):
-        plain, node = self.resolved(), self.resolved(node="24")
-        self.registry.values[("node:24-alpine", "Manifest")] = manifest("new-node")
-        self.assertEqual(plain["fingerprint"], self.resolved()["fingerprint"])
-        self.assertNotEqual(node["fingerprint"], self.resolved(node="24")["fingerprint"])
+    def test_pie_and_composer_updates_select_all(self):
+        path = self.root / 'Dockerfile'
+        for tool in ('PIE_IMAGE', 'COMPOSER_IMAGE'):
+            changed = self.affected(lambda: path.write_text(re.sub(rf'^(ARG {tool}="[^"@]+:)[^"@]+', r'\g<1>999.0.0-bin', path.read_text(), flags=re.M)))
+            self.assertEqual(len(changed), 8)
 
-    def test_composer_pie_and_extension_updates_change_fingerprint(self):
-        before = self.resolved()["fingerprint"]
-        for url, body in (
-            (PIE_URL, b"updated pie"),
-            ("https://getcomposer.org/versions", b'{"stable":[{"version":"2.9.1","min-php":70205}]}'),
-        ):
-            with self.subTest(url=url):
-                original = self.http.cache[url]
-                self.http.cache[url] = body
-                self.assertNotEqual(before, self.resolved()["fingerprint"])
-                self.http.cache[url] = original
+    def test_apk_revisions_and_transitives_select_release(self):
+        for arch in ('amd64', 'arm64'):
+            changed = self.affected(lambda: self.change_json(f'build/apk/3.24/{arch}.json', lambda c: c['packages'].update({'libzip': '1.11.4-r99'})))
+            self.assertEqual(len(changed), 8)
+        self.assertEqual(affected_tags([dict(e, alpine='3.25') for e in self.entries()], self.root, self.base), set())
 
-    def test_extension_update_changes_fingerprint(self):
-        before = self.resolved()["fingerprint"]
-        self.pie_versions["redis"] = "6.2.0"
-        self.assertNotEqual(before, self.resolved()["fingerprint"])
+    def test_docs_renovate_and_unrelated_changes_select_nothing(self):
+        for filename in ('README.md', 'renovate.json', 'notes.txt'):
+            self.assertEqual(self.affected(lambda: (self.root / filename).write_text('{}\n')), [])
 
-    def test_core_only_image_does_not_resolve_pie(self):
-        del self.http.cache[PIE_API]
-        entry = self.resolved(extensions="bcmath gd")
-        self.assertEqual(json.loads(entry["build_inputs"])["extension_versions"], {})
-        self.assertEqual(entry["resolved"]["extensions_install"], "bcmath gd")
-        self.pie_runner.info.assert_not_called()
+    def test_mixed_changes_across_multiple_push_commits(self):
+        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='6.3.1'))
+        self.commit()
+        self.change_json('build/php/8.3.json', lambda c: c['xhprof'].update(commit='a' * 40))
+        self.commit()
+        tags = affected_tags(self.entries(), self.root, self.base)
+        self.assertEqual(len(tags), 4)
+        self.assertTrue(all(tag.startswith(('8.2-', '8.3-')) for tag in tags))
 
-    def test_package_names_and_options_preserve_runtime_names(self):
-        entry = self.resolved(extensions="bcmath redis amqp xdebug pcov")
-        for name, package in PIE_PACKAGES.items():
-            self.assertEqual(entry["resolved"]["pie_packages"][name], {
-                "package": package, "version": self.pie_versions[name],
-                "configure_options": PIE_OPTIONS.get(name, []),
-            })
-        self.assertEqual(json.loads(entry["build_inputs"])["schema"], 2)
+    def test_pr_selection_uses_checked_out_merge_result(self):
+        self.git('checkout', '-qb', 'feature')
+        (self.root / 'scripts/new.sh').write_text('echo test\n')
+        self.commit()
+        self.git('checkout', 'main')
+        (self.root / 'README.md').write_text('new documentation')
+        base = self.commit()
+        self.git('merge', '--no-ff', '-qm', 'merge result', 'feature')
+        self.assertEqual(len(select(self.entries(), self.root, base)['phpimages']), 8)
 
-    def test_resolution_uses_pinned_bases_and_is_cached_across_node_variants(self):
-        resolver = self.resolver()
-        plain = resolver.resolve(ENTRY)
-        resolver.resolve({**ENTRY, "node": "24"})
-        self.pie_runner.info.assert_called_once_with(plain["resolved"]["php_images"], b"pie contents", "phpredis/phpredis")
-        self.assertNotIn("node_images", json.loads(plain["dependencies"]))
+    def test_renames_additions_and_deletions(self):
+        (self.root / 'scripts/new.sh').write_text('echo test\n')
+        self.commit()
+        changed = self.affected(lambda: (self.root / 'scripts/new.sh').rename(self.root / 'moved.txt'))
+        self.assertEqual(len(changed), 8)
+        changed = self.affected(lambda: (self.root / 'moved.txt').rename(self.root / 'scripts/back.sh'))
+        self.assertEqual(len(changed), 8)
+        self.assertEqual(len(self.affected(lambda: (self.root / 'scripts/back.sh').unlink())), 8)
 
-    def test_no_extensions_does_not_resolve_tools(self):
-        self.http.cache.clear()
-        entry = self.resolved(extensions="")
-        self.assertEqual(entry["resolved"]["composer"]["version"], "")
-        self.assertEqual(entry["resolved"]["pie"], {})
+    def test_deleted_manifest_selects_previously_built_minor_for_supersession(self):
+        entries = self.entries()
+        (self.root / 'build/php/8.2.json').unlink()
+        self.commit()
+        self.assertEqual(len(affected_tags(entries, self.root, self.base)), 2)
+        self.assertEqual(len(self.entries()), 6)
 
-    def test_removed_pecl_field_is_rejected(self):
-        with self.assertRaisesRegex(ResolutionError, "field was removed"):
-            self.resolved(pecl="redis")
-
-    def test_unmapped_extensions_fail_without_fallback(self):
-        for extension in ("unknown", "imap", "redis-6.1.0"):
-            with self.subTest(extension=extension), self.assertRaises(ResolutionError):
-                self.resolved(extensions=extension)
-
-    def test_pie_failure_propagates(self):
-        self.pie_runner.info.side_effect = ResolutionError("No compatible package")
-        with self.assertRaisesRegex(ResolutionError, "No compatible package"):
-            self.resolved()
-
-    def test_invalid_pie_output_fails_closed(self):
-        valid = "Extension name: redis\nComposer package name: phpredis/phpredis\nVersion: 6.1.0\n"
-        for invalid in ("", valid + "Version: 6.2.0\n", valid.replace("redis\n", "other\n", 1),
-                        valid.replace("phpredis/phpredis", "other/package"), valid.replace("6.1.0", "7.0.0RC1")):
-            with self.subTest(output=invalid), self.assertRaises(ResolutionError):
-                parse_pie_info(invalid, "redis", "phpredis/phpredis")
-        self.assertEqual(parse_pie_info(valid.replace("6.1.0", "v6.1.0"), "redis", "phpredis/phpredis"), "6.1.0")
-
-    def test_tool_checksums_are_verified(self):
-        self.http.cache[COMPOSER_URL + ".sha256sum"] = b"wrong"
-        with self.assertRaisesRegex(ResolutionError, "Composer PHAR checksum mismatch"):
-            self.resolved()
-        self.http.cache[PIE_API] = canonical({"tag_name": "1.5.3", "assets": [{
-            "name": "pie.phar", "browser_download_url": PIE_URL, "digest": "sha256:wrong",
-        }]}).encode()
-        with self.assertRaisesRegex(ResolutionError, "PIE release asset checksum mismatch"):
-            self.resolver().pie()
-
-    def xhprof_fixture(self, minimum="7.0.0", module_version="2.3.9"):
-        commit = "a" * 40
-        base = f"https://raw.githubusercontent.com/longxinH/xhprof/{commit}/"
-        files = {"package.xml": f"<package><dependencies><required><php><min>{minimum}</min></php></required></dependencies></package>".encode(),
-                 "extension/php_xhprof.h": f'#define XHPROF_VERSION "{module_version}"\n'.encode()}
-        archive = io.BytesIO()
-        with tarfile.open(fileobj=archive, mode="w:gz") as output:
-            for name, data in files.items():
-                member = tarfile.TarInfo(f"xhprof-{commit}/{name}")
-                member.size = len(data)
-                output.addfile(member, io.BytesIO(data))
-        self.http.cache[f"{XHPROF_API}/tags?per_page=100&page=1"] = canonical([
-            {"name": "v2.4.0RC1", "commit": {"sha": "b" * 40}},
-            {"name": "v2.3.10", "commit": {"sha": commit}},
-        ]).encode()
-        for name, data in files.items():
-            self.http.cache[base + name] = data
-        url = f"https://codeload.github.com/longxinH/xhprof/tar.gz/{commit}"
-        self.http.cache[url] = archive.getvalue()
-        return url
-
-    def test_xhprof_tracks_source_tag_and_actual_module_version(self):
-        url = self.xhprof_fixture()
-        entry = self.resolved(extensions="xhprof")
-        source = entry["resolved"]["xhprof"]
-        self.assertEqual(source["tag"], "v2.3.10")
-        self.assertEqual(source["version"], "2.3.9")
-        self.assertEqual(source["sha256"], sha256(self.http.cache[url]))
-        self.assertEqual(json.loads(entry["build_inputs"])["extension_versions"], {"xhprof": "2.3.9"})
-        self.pie_runner.info.assert_not_called()
-
-    def test_xhprof_php_requirements_are_checked(self):
-        self.xhprof_fixture(minimum="8.5.0")
-        with self.assertRaisesRegex(ResolutionError, "No stable XHProf"):
-            self.resolved(extensions="xhprof")
-        for requirements in ("<min>8.5</min>", "<max>8.3.99</max>", "<exclude>8.4.17</exclude>"):
-            package = ET.fromstring("<package><dependencies><required><php>" + requirements + "</php></required></dependencies></package>")
-            self.assertFalse(compatible_php(package, "8.4.17"))
-
-    def test_xhprof_archive_metadata_must_match(self):
-        self.xhprof_fixture()
-        self.http.cache[f"https://raw.githubusercontent.com/longxinH/xhprof/{'a' * 40}/extension/php_xhprof.h"] = b'#define XHPROF_VERSION "2.3.10"\n'
-        with self.assertRaisesRegex(ResolutionError, "archive metadata mismatch"):
-            self.resolved(extensions="xhprof")
-
-    def test_source_and_configuration_changes_affect_fingerprint(self):
-        before = self.resolved()["fingerprint"]
-        self.assertNotEqual(before, self.resolved(packages="curl")["fingerprint"])
-        self.assertNotEqual(before, self.resolved(patch=18)["fingerprint"])
-        (self.root / "Dockerfile").write_text("modified build")
-        self.assertNotEqual(before, self.resolved()["fingerprint"])
-
-    def test_docs_and_unrelated_matrix_changes_do_not_affect_fingerprint(self):
-        before = self.resolved()["fingerprint"]
-        (self.root / "README.md").write_text("new documentation")
-        (self.root / "matrix.json").write_text('{"unrelated":"variant"}')
-        self.assertEqual(before, self.resolved()["fingerprint"])
-
-    def test_missing_base_architecture_fails_resolution(self):
-        self.registry.values[("php:8.4.17-fpm-alpine", "Manifest")] = manifest("base", ("linux/amd64",))
-        with self.assertRaisesRegex(ResolutionError, "missing linux/arm64"):
-            self.resolved()
-
-    def test_publish_requires_both_architectures(self):
-        entry = self.resolved()
-        directory = self.artifact_directory(entry, ("linux/amd64",))
-        run = Mock()
+    def test_initial_push_and_manual_selection(self):
+        entries = self.entries()
+        self.assertEqual(len(select(entries, self.root, '0' * 40)['phpimages']), 8)
+        self.assertEqual(len(select(entries, self.root, php='All')['phpimages']), 8)
+        for minor in ('8.2', '8.3', '8.4', '8.5'):
+            selected = select(entries, self.root, php=minor)['phpimages']
+            self.assertEqual(len(selected), 2)
+            self.assertTrue(all(e['minor'] == minor for e in selected))
         with self.assertRaises(ResolutionError):
-            publish_variant(entry, directory, IMAGE, self.registry, run)
-        run.assert_not_called()
+            select(entries, self.root, php='8.1')
 
-    def test_duplicate_architecture_and_mismatched_fingerprint_are_rejected(self):
-        entry = self.resolved()
-        directory = self.artifact_directory(entry)
-        path = directory / "1.json"
-        original = json.loads(path.read_text())
-        for field, value in (("platform", "linux/amd64"), ("fingerprint", "wrong"), ("digest", "wrong")):
+    def test_invalid_references_fail_selection(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            affected_tags(self.entries(), self.root, 'nonexistent')
+        with self.assertRaises(subprocess.CalledProcessError):
+            affected_tags(self.entries(), self.root, self.base, 'nonexistent')
+
+    def test_reruns_repeat_selection(self):
+        self.change_json('build/php/8.2.json', lambda c: c.update(packages=''))
+        self.commit()
+        selection = select(self.entries(), self.root, self.base)
+        source = self.git('rev-parse', 'HEAD')
+        (self.root / 'README.md').write_text('later documentation')
+        self.commit()
+        self.git('checkout', '--detach', source)
+        retry = select(self.entries(), self.root, self.base)
+        self.assertEqual(retry, selection)
+        self.assertEqual(len(retry['phpimages']), 2)
+
+    def test_invalid_configuration_fails(self):
+        self.change_json('build/php/8.2.json', lambda c: c['xhprof'].update(commit='latest'))
+        with self.assertRaises(ResolutionError):
+            self.entries()
+        self.git('checkout', '--', 'build/php/8.2.json')
+        self.change_json('build/apk/3.24/amd64.json', lambda c: c.update(architecture='aarch64'))
+        with self.assertRaises(ResolutionError):
+            self.entries()
+        self.git('checkout', '--', 'build/apk/3.24/amd64.json')
+        self.change_json('build/apk/3.24/amd64.json', lambda c: c['packages'].update(libzip='~1'))
+        with self.assertRaises(ResolutionError):
+            self.entries()
+        self.git('checkout', '--', 'build/apk/3.24/amd64.json')
+        path = self.root / 'Dockerfile'
+        path.write_text(path.read_text().replace('node:24.', 'node:26.'))
+        with self.assertRaises(ResolutionError):
+            self.entries()
+
+    def test_cli_outputs_and_removed_registry_options(self):
+        script = self.root / 'scripts/select_images.py'
+        output = self.root / '.git/matrix.json'
+        github_output = self.root / '.git/github-output'
+        result = subprocess.run([sys.executable, str(script), '--php', '8.4', '--out', str(output), '--github-output', str(github_output)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(json.loads(output.read_text())['phpimages']), 2)
+        self.assertIn('has_changes=true', github_output.read_text())
+        self.assertNotIn('has_repairs', github_output.read_text())
+        result = subprocess.run([sys.executable, str(script), '--base-ref', self.base, '--out', str(output)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(output.read_text())['phpimages'], [])
+        for extra in (['--published'], ['--image', IMAGE], ['--base-ref', 'missing']):
+            result = subprocess.run([sys.executable, str(script), '--out', str(output), *extra], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+
+
+class CurrentSourceTests(RepositoryTests):
+    def test_relevant_update_supersedes_only_its_minor(self):
+        entries = self.entries()
+        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='999.0.0'))
+        self.commit()
+        self.assertTrue(check_current(entries[0], self.root))
+        self.assertFalse(check_current(entries[2], self.root))
+
+    def test_node_update_supersedes_only_node(self):
+        plain, node = self.entries()[:2]
+        self.change_node()
+        self.commit()
+        self.assertFalse(check_current(plain, self.root))
+        self.assertTrue(check_current(node, self.root))
+
+    def test_current_source_and_unrelated_changes_are_allowed(self):
+        entry = self.entries()[0]
+        self.assertFalse(check_current(entry, self.root))
+        (self.root / 'README.md').write_text('documentation update')
+        self.commit()
+        self.assertFalse(check_current(entry, self.root))
+
+    def test_fetch_failure_missing_and_malformed_sources_fail(self):
+        entry = self.entries()[0]
+        with self.assertRaises(ResolutionError):
+            check_current(dict(entry, source_ref='main'), self.root)
+        with self.assertRaises(subprocess.CalledProcessError):
+            check_current(dict(entry, source_ref='a' * 40), self.root)
+        self.git('remote', 'remove', 'origin')
+        with self.assertRaises(subprocess.CalledProcessError):
+            check_current(entry, self.root)
+
+    def test_check_current_cli_has_distinct_output_and_modes(self):
+        script = self.root / 'scripts/select_images.py'
+        entry = self.entries()[0]
+        output = self.root / '.git/current-output'
+        args = [sys.executable, str(script), '--check-current', json.dumps(entry), '--github-output', str(output)]
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), 'superseded=false\n')
+        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='999.0.0'))
+        self.commit()
+        output.unlink()
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), 'superseded=true\n')
+        for extra in (['--php', '8.2'], ['--base-ref', self.base]):
+            result = subprocess.run(args + extra, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+
+
+class MetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.entry = manifests(ROOT)[0]
+        self.config = {'os': 'linux', 'architecture': 'amd64', 'config': {'Labels': {
+            REVISION_LABEL: self.entry['source_ref'], VARIANT_LABEL: self.entry['tagMinor']}}}
+
+    def test_matching_metadata_and_platform_wrappers(self):
+        verify_metadata(self.config, self.entry, 'linux/amd64')
+        verify_metadata({'linux/amd64': self.config}, self.entry, 'linux/amd64')
+
+    def test_wrong_architecture_source_or_variant_fails(self):
+        with self.assertRaises(ValueError):
+            verify_metadata(self.config, self.entry, 'linux/arm64')
+        for label in (REVISION_LABEL, VARIANT_LABEL):
+            config = copy.deepcopy(self.config)
+            config['config']['Labels'][label] = 'wrong'
+            with self.assertRaises(ValueError):
+                verify_metadata(config, self.entry, 'linux/amd64')
+        with self.assertRaises(ValueError):
+            verify_metadata({}, self.entry, 'linux/amd64')
+
+    def test_metadata_cli_requires_platform_and_valid_json(self):
+        args = [sys.executable, str(ROOT / 'scripts/verify_image.py'), '--metadata', '--entry', json.dumps(self.entry)]
+        result = subprocess.run(args + ['--platform', 'linux/amd64'], input=json.dumps(self.config), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for extra, data in [([], '{}'), (['--platform', 'linux/amd64'], 'not json'), (['--platform', 'linux/arm64'], json.dumps(self.config))]:
+            result = subprocess.run(args + extra, input=data, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_publication_is_commit_driven_and_queued(self):
+        workflow = (ROOT / '.github/workflows/build-test-publish.yml').read_text()
+        self.assertNotIn('schedule:', workflow)
+        self.assertIn('queue: max', workflow)
+        self.assertIn('cancel-in-progress: false', workflow)
+        self.assertIn('      - tests/**', workflow)
+        self.assertIn('BASE_REF: ${{ github.event.before }}', workflow)
+        self.assertIn('ref: ${{ github.event_name == \'workflow_dispatch\' && \'main\' || github.sha }}', workflow)
+        self.assertIn('run: test "$GITHUB_REF" = refs/heads/main', workflow)
+        for minor in ('All', '8.2', '8.3', '8.4', '8.5'):
+            self.assertIn("'" + minor + "'", workflow)
+        selection_job = workflow.split('  select-variants:', 1)[1].split('  build-and-test:', 1)[0]
+        self.assertNotIn('docker/login-action', selection_job)
+        self.assertNotIn('docker/setup-buildx-action', selection_job)
+        self.assertNotIn('--published', workflow)
+        self.assertNotIn('has_repairs', workflow)
+
+    def test_source_and_variant_identity_follow_the_tested_oci_image(self):
+        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
+        self.assertIn('org.opencontainers.image.revision=${{ inputs.source-ref }}', workflow)
+        self.assertIn('io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}', workflow)
+        self.assertNotIn('input_hash', workflow)
+        self.assertIn('needs: build-and-test', workflow)
+        self.assertIn('    if: inputs.publish', workflow)
+        self.assertIn('overwrite: true', workflow)
+        self.assertIn('name: digests-${{ fromJson(inputs.variant).tagMinor }}-amd64', workflow)
+        self.assertIn('name: digests-${{ fromJson(inputs.variant).tagMinor }}-arm64', workflow)
+        self.assertNotIn('continue-on-error', workflow)
+        self.assertNotIn('concurrency:', workflow)
+        self.assertIn('regctl image copy', workflow)
+        self.assertIn('test "$config" = "$(docker image inspect test', workflow)
+
+    def test_native_architecture_gate_and_variant_independence(self):
+        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
+        self.assertIn('arch: [amd64, arm64]', workflow)
+        header = workflow.split('\n  publish:\n', 1)[1].split('    steps:', 1)[0]
+        self.assertIn('needs: build-and-test', header)
+        self.assertIn('if: inputs.publish', header)
+        self.assertNotIn('always()', header)
+        for name in ('build-test.yml', 'build-test-publish.yml'):
+            workflow = (ROOT / '.github/workflows' / name).read_text()
+            call = workflow.split('\n  build-and-test:\n', 1)[1].split('\n  validate-', 1)[0]
+            self.assertIn('fail-fast: false', call)
+            self.assertIn('variant: ${{ toJson(matrix.phpimage) }}', call)
+            self.assertNotIn('selected-images', workflow)
+
+
+class PublicationStepTests(unittest.TestCase):
+    """Exercise the real workflow shell with a registry stub; no Docker daemon."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / 'digests').mkdir()
+        (self.root / 'bin').mkdir()
+        self.entry = manifests(ROOT)[0]
+        self.digests = {'amd64': digest('amd64'), 'arm64': digest('arm64')}
+        for arch, value in self.digests.items():
+            (self.root / 'digests' / (arch + '.digest')).write_text(value + '\n')
+            config = {'os': 'linux', 'architecture': arch, 'config': {'Labels': {
+                REVISION_LABEL: self.entry['source_ref'], VARIANT_LABEL: self.entry['tagMinor']}}}
+            (self.root / (arch + '.json')).write_text(json.dumps(config))
+        self.manifest = {'digest': digest('index'), 'manifests': [
+            {'platform': {'os': 'linux', 'architecture': arch}, 'digest': value} for arch, value in self.digests.items()]}
+        for key in ('tagMinor', 'tagPatch'):
+            (self.root / (self.entry[key] + '.json')).write_text(json.dumps(self.manifest))
+        docker = self.root / 'bin/docker'
+        docker.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['MOCK_ROOT'])
+with (root / 'calls').open('a') as log: log.write(json.dumps(sys.argv[1:]) + '\\n')
+if os.environ.get('REGISTRY_FAILURE'): sys.exit(9)
+if sys.argv[3] == 'create': sys.exit(8 if os.environ.get('CREATE_FAILURE') else 0)
+ref = sys.argv[4]
+if '@' in ref:
+    name = next(arch for arch in ('amd64', 'arm64') if (root / 'digests' / (arch + '.digest')).read_text().strip() == ref.split('@')[1])
+else:
+    name = ref.rsplit(':', 1)[1]
+print((root / (name + '.json')).read_text())
+""")
+        docker.chmod(0o755)
+        self.env = dict(os.environ, MOCK_ROOT=str(self.root), RUNNER_TEMP=str(self.root),
+                        PATH=str(self.root / 'bin') + os.pathsep + os.environ['PATH'],
+                        ENTRY=json.dumps(self.entry), IMAGE=IMAGE,
+                        TAG_MINOR=self.entry['tagMinor'], TAG_PATCH=self.entry['tagPatch'])
+
+    def run_step(self, name):
+        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
+        step = workflow.split('      - name: ' + name + '\n', 1)[1].split('\n      - ', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=ROOT, env=self.env, capture_output=True, text=True)
+
+    def test_verified_candidates_publish_exact_digests(self):
+        result = self.run_step('Verify candidate metadata')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_step('Publish and verify tags')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / 'calls').read_text().splitlines()]
+        create = next(call for call in calls if call[2] == 'create')
+        self.assertEqual(create[-2:], [IMAGE + '@' + self.digests[arch] for arch in ('amd64', 'arm64')])
+        self.assertNotIn('build', create)
+
+    def test_missing_and_malformed_digest_files_fail(self):
+        path = self.root / 'digests/arm64.digest'
+        original = path.read_text()
+        for value in ('invalid', original + original):
+            path.write_text(value)
+            self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
+        path.unlink()
+        self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
+
+    def test_candidate_identity_and_registry_errors_propagate(self):
+        path = self.root / 'arm64.json'
+        config = json.loads(path.read_text())
+        config['config']['Labels'][REVISION_LABEL] = 'wrong'
+        path.write_text(json.dumps(config))
+        self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
+        self.env['REGISTRY_FAILURE'] = '1'
+        self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
+
+    def test_missing_duplicate_extra_and_wrong_manifest_children_fail(self):
+        path = self.root / (self.entry['tagPatch'] + '.json')
+        for kind in ('missing', 'duplicate', 'extra', 'digest', 'index', 'index format', 'malformed'):
+            manifest = copy.deepcopy(self.manifest)
+            if kind == 'missing': manifest['manifests'].pop()
+            elif kind == 'duplicate': manifest['manifests'][1] = manifest['manifests'][0]
+            elif kind == 'extra': manifest['manifests'].append(manifest['manifests'][0])
+            elif kind == 'digest': manifest['manifests'][0]['digest'] = digest('wrong')
+            elif kind == 'index': manifest['digest'] = digest('other index')
+            elif kind == 'index format': manifest['digest'] = 'invalid'
+            path.write_text('not json' if kind == 'malformed' else json.dumps(manifest))
+            with self.subTest(kind=kind):
+                self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
+
+    def test_create_failure_stops_tag_verification(self):
+        self.env['CREATE_FAILURE'] = '1'
+        self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
+        calls = (self.root / 'calls').read_text().splitlines()
+        self.assertEqual(len(calls), 1)
+
+
+class VersionTests(unittest.TestCase):
+    def setUp(self):
+        self.entry = manifests(ROOT)[1]
+        self.entry['xhprof'] = dict(self.entry['xhprof'], tag='v2.3.10')
+        self.php = self.entry['php_version']
+        self.composer = self.entry['composer_version']
+        self.node = self.entry['node_version']
+        self.source = dict(self.entry['xhprof'], version='2.3.9')
+        self.versions = dict(self.entry['extension_versions'], xhprof='2.3.9')
+        self.labels = {REVISION_LABEL: self.entry['source_ref'], VARIANT_LABEL: self.entry['tagMinor']}
+
+    def run_image(self, command, **kwargs):
+        if command[:3] == ['docker', 'image', 'inspect']:
+            return json.dumps(self.labels)
+        if command[-1] == 'echo PHP_VERSION;':
+            return self.php
+        if command[-1].endswith('xhprof-build.json'):
+            return json.dumps(self.source)
+        if 'composer' in command:
+            return f'Composer version {self.composer} 2026-10-01'
+        if 'node' in command:
+            return 'v' + self.node
+        return json.dumps(self.versions)
+
+    def test_xhprof_tag_and_module_versions_can_differ(self):
+        self.assertEqual(self.source['tag'], 'v2.3.10')
+        verify('test', self.entry, self.run_image)
+
+    def test_wrong_source_or_variant_label_fails(self):
+        for label in (REVISION_LABEL, VARIANT_LABEL):
+            old = self.labels[label]
+            self.labels[label] = 'wrong'
+            with self.assertRaises(ValueError):
+                verify('test', self.entry, self.run_image)
+            self.labels[label] = old
+
+    def test_unexpected_php_tool_and_extension_versions_fail(self):
+        for field, value in [('php', '8.2.0'), ('composer', '2.10.0'), ('node', '24.0.0')]:
             with self.subTest(field=field):
-                path.write_text(canonical({**original, field: value}))
-                with self.assertRaises(ResolutionError):
-                    validated_digests(entry, directory)
+                original = getattr(self, field)
+                setattr(self, field, value)
+                with self.assertRaises(ValueError):
+                    verify('test', self.entry, self.run_image)
+                setattr(self, field, original)
+        self.versions['redis'] = '0.0.1'
+        with self.assertRaises(ValueError):
+            verify('test', self.entry, self.run_image)
 
-    def test_successful_publish_tags_same_manifest_and_next_run_skips(self):
-        entry = self.resolved()
-        directory = self.artifact_directory(entry)
-        self.registry.published(entry)
-        run = Mock()
-        publish_variant(entry, directory, IMAGE, self.registry, run)
-        command = run.call_args.args[0]
-        self.assertEqual(command.count("--tag"), 2)
-        self.assertIn(f'{IMAGE}:{entry["tagMinor"]}', command)
-        self.assertIn(f'{IMAGE}:{entry["tagPatch"]}', command)
-        self.assertIsNone(selection_reason(entry, self.registry, IMAGE))
-
-    def test_invalid_pushed_labels_prevent_tagging(self):
-        entry = self.resolved()
-        directory = self.artifact_directory(entry)
-        self.registry.published(entry)
-        self.registry.values[(f'{IMAGE}@{digest("publishedlinux/arm64")}', "Image")]["config"]["Labels"] = {}
-        run = Mock()
-        with self.assertRaisesRegex(ResolutionError, "dependency labels"):
-            publish_variant(entry, directory, IMAGE, self.registry, run)
-        run.assert_not_called()
-
-    def test_partial_failure_does_not_block_complete_variant(self):
-        incomplete = self.resolved()
-        complete = self.resolved(node="24")
-        self.artifact_directory(incomplete, ("linux/amd64",))
-        self.artifact_directory(complete)
-        self.registry.published(complete)
-        run = Mock()
-        failed, report = publish([incomplete, complete], self.root / "digests", IMAGE, self.registry, run)
-        self.assertTrue(failed)
-        self.assertIn("Failed", report)
-        self.assertIn("Published", report)
-        run.assert_called_once()
-
-    def test_interrupted_publication_is_retried(self):
-        entry = self.resolved()
-        directory = self.artifact_directory(entry)
-        self.registry.published(entry)
-        self.registry.values[(f'{IMAGE}:{entry["tagMinor"]}', "Manifest")] = manifest("old")
-        with self.assertRaisesRegex(ResolutionError, "Tag verification failed"):
-            publish_variant(entry, directory, IMAGE, self.registry, Mock())
-        self.assertIsNotNone(selection_reason(entry, self.registry, IMAGE))
-
-    def test_version_verification_rejects_unexpected_installed_extension(self):
-        entry = self.resolved()
-        labels = {FINGERPRINT_LABEL: entry["fingerprint"], INPUTS_LABEL: entry["build_inputs"]}
-        run = Mock(side_effect=[canonical(labels), "8.4.17", '{"redis":"6.0.0"}'])
-        with self.assertRaisesRegex(ValueError, "Installed extension versions differ"):
-            verify("test", entry["build_inputs"], entry["fingerprint"], run)
-
-    def test_installed_versions_and_labels_match(self):
-        entry = self.resolved()
-        labels = {FINGERPRINT_LABEL: entry["fingerprint"], INPUTS_LABEL: entry["build_inputs"]}
-        run = Mock(side_effect=[canonical(labels), "8.4.17", '{"redis":"6.1.0"}', "Composer version 2.9.0 2025-01-01"])
-        verify("test", entry["build_inputs"], entry["fingerprint"], run)
+    def test_xhprof_source_and_actual_version_must_match(self):
+        self.source['commit'] = 'a' * 40
+        with self.assertRaises(ValueError):
+            verify('test', self.entry, self.run_image)
+        self.source['commit'] = self.entry['xhprof']['commit']
+        self.versions['xhprof'] = '2.3.10'
+        with self.assertRaises(ValueError):
+            verify('test', self.entry, self.run_image)
 
 
-class NetworkTests(unittest.TestCase):
-    def test_pie_runs_native_pinned_base_with_verified_phar_and_pecl_blocked(self):
-        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, "aarch64\n", ""),
-                                subprocess.CompletedProcess([], 0, "metadata", "")])
-        runner = PieRunner(run)
-        self.assertEqual(runner.info({"linux/arm64": "php@sha256:pinned"}, b"verified pie", "pecl/pcov"), "metadata")
-        command = run.call_args.args[0]
-        self.assertIn("linux/arm64", command)
-        self.assertIn("php@sha256:pinned", command)
-        self.assertIn("pecl.php.net:127.0.0.1", command)
-        self.assertEqual(command[-1], "pecl/pcov:*@stable")
-        self.assertIn("--no-interaction", command)
-        self.assertIn("--no-ansi", command)
-        self.assertEqual(run.call_args.kwargs["input"], "dmVyaWZpZWQgcGll")
+class RenovateTests(unittest.TestCase):
+    def test_custom_managers_extract_all_pins(self):
+        config=json.loads((ROOT/'renovate.json').read_text())
+        counts=[]
+        for manager in config['customManagers']:
+            matches=[]
+            for pattern in manager['managerFilePatterns']:
+                pattern=pattern.strip('/')
+                for path in ROOT.glob('build/**/*.json'):
+                    if not re.search(pattern,path.relative_to(ROOT).as_posix()):continue
+                    for expression in manager['matchStrings']:
+                        expression=re.sub(r'\(\?<([a-zA-Z]+)>',r'(?P<\1>',expression)
+                        matches+=list(re.finditer(expression,path.read_text()))
+            counts.append(len(matches))
+        self.assertEqual(counts[:3],[4,16,4])
+        self.assertEqual(counts[3:5], [len(json.loads((ROOT/f'build/apk/3.24/{arch}.json').read_text())['packages']) for arch in ('amd64','arm64')])
 
-    def test_pie_container_failure_is_fatal(self):
-        run = Mock(return_value=subprocess.CompletedProcess([], 1, "", "resolver failed"))
-        with self.assertRaisesRegex(ResolutionError, "resolver failed"):
-            PieRunner(run).native_platform()
+    def test_revision_aware_architecture_specific_lookup(self):
+        config=json.loads((ROOT/'renovate.json').read_text())
+        apk=[m for m in config['customManagers'] if m['datasourceTemplate']=='apk']
+        self.assertEqual(len(apk),2)
+        self.assertTrue(all('branch=v3.24' in m['registryUrlTemplate'] for m in apk))
+        self.assertEqual({m['registryUrlTemplate'].split('arch=')[1] for m in apk},{'x86_64','aarch64'})
+    def test_only_nonmajor_updates_automerge(self):
+        config=json.loads((ROOT/'renovate.json').read_text())
+        self.assertFalse(config['automerge'])
+        rules=[r for r in config['packageRules'] if r.get('automerge')]
+        self.assertTrue(rules);self.assertTrue(all('major' not in r['matchUpdateTypes'] for r in rules))
+    def test_aggregate_check_accepts_only_valid_job_outcomes(self):
+        import os
+        workflow=(ROOT/'.github/workflows/build-test.yml').read_text()
+        script=workflow.split('      - name: Require successful checks or an intentional empty selection',1)[1].split('        run: |\n',1)[1]
+        import textwrap
+        script=textwrap.dedent(script)
+        for check, build, changes, succeeds in [
+            ('success','success','true',True), ('success','skipped','false',True),
+            ('failure','skipped','false',False), ('success','failure','true',False),
+            ('success','skipped','true',False), ('success','success','false',False),
+            ('success','skipped','',False), ('cancelled','success','true',False)]:
+            with self.subTest(check=check,build=build,changes=changes):
+                result=subprocess.run(['bash','-e','-c',script],env=dict(os.environ,CHECK_RESULT=check,BUILD_RESULT=build,HAS_CHANGES=changes))
+                self.assertEqual(result.returncode==0,succeeds)
 
-    def test_unsupported_docker_architecture_is_rejected(self):
-        run = Mock(return_value=subprocess.CompletedProcess([], 0, "s390x", ""))
-        with self.assertRaisesRegex(ResolutionError, "Unsupported Docker architecture"):
-            PieRunner(run).native_platform()
-
-    @patch("select_images.time.sleep")
-    @patch("select_images.subprocess.run")
-    def test_authentication_failure_is_not_a_missing_image(self, run, sleep):
-        run.return_value = subprocess.CompletedProcess([], 1, "", "401 Unauthorized")
-        with self.assertRaisesRegex(ResolutionError, "Unauthorized"):
-            Registry().inspect("image:tag", missing_ok=True)
-        self.assertEqual(run.call_count, 3)
-
-    @patch("select_images.subprocess.run")
-    def test_registry_not_found_is_a_missing_image(self, run):
-        for message in ("manifest unknown", "ERROR: image:tag: not found"):
-            with self.subTest(message=message):
-                run.return_value = subprocess.CompletedProcess([], 1, "", message)
-                self.assertIsNone(Registry().inspect("image:tag", missing_ok=True))
-
-    @patch("select_images.subprocess.run")
-    def test_invalid_registry_json_is_an_error(self, run):
-        run.return_value = subprocess.CompletedProcess([], 0, "null", "")
-        with self.assertRaisesRegex(ResolutionError, "Invalid registry metadata"):
-            Registry().inspect("image:tag")
-
-    @patch("select_images.time.sleep")
-    @patch("select_images.urlopen")
-    def test_upstream_network_failure_is_an_error(self, urlopen, sleep):
-        urlopen.side_effect = URLError("offline")
-        with self.assertRaisesRegex(ResolutionError, "offline"):
-            HTTP().get(PIE_API)
-        self.assertEqual(urlopen.call_count, 3)
-
-    @patch("select_images.time.sleep")
-    @patch("select_images.urlopen")
-    def test_upstream_authentication_failure_is_not_retried(self, urlopen, sleep):
-        urlopen.side_effect = HTTPError("url", 403, "Forbidden", {}, None)
-        with self.assertRaisesRegex(ResolutionError, "HTTP 403"):
-            HTTP().get(PIE_API)
-        urlopen.assert_called_once()
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

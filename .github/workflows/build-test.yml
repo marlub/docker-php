@@ -8,61 +8,67 @@ permissions:
 
 jobs:
   read-matrix:
-    name: Read matrix
+    name: Select affected variants
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.prepare_build_vars.outputs.matrix }}
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_changes: ${{ steps.select.outputs.has_changes }}
       source_ref: ${{ steps.source.outputs.ref }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Validate configuration and publication logic
+        run: python -m unittest discover -s tests -v
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Validate Renovate configuration
+        run: npx --yes --package renovate@44.181.0 renovate-config-validator --strict
       - name: Record build source
         id: source
         run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Test dependency selection and publication
-        run: python -m unittest discover -s tests -v
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Resolve all build variants
-        id: prepare_build_vars
+      - name: Select affected variants
+        id: select
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/select_images.py --select-all \
-            --out "$RUNNER_TEMP/selected-images.json" \
-            --github-output "$GITHUB_OUTPUT" \
-            --summary "$GITHUB_STEP_SUMMARY"
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/select_images.py --base-ref "$BASE_REF" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   build-and-test:
-    name: Build and test
+    name: ${{ matrix.phpimage.tagMinor }}
     needs: read-matrix
+    if: needs.read-matrix.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        phpimage: ${{ fromJson(needs.read-matrix.outputs.matrix).phpimages }}
     uses: ./.github/workflows/template-images.yml
     with:
       publish: false
       registry: ''
       image: ''
-      matrix: ${{ needs.read-matrix.outputs.matrix }}
+      variant: ${{ toJson(matrix.phpimage) }}
       source-ref: ${{ needs.read-matrix.outputs.source_ref }}
 
   validate-build-and-test:
     name: Validate build outcome
     runs-on: ubuntu-latest
     needs: [read-matrix, build-and-test]
-    if: ${{ cancelled() || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'failure') }}
+    if: always()
     steps:
-      - name: Conditionally fail required check
+      - name: Require successful checks or an intentional empty selection
+        env:
+          CHECK_RESULT: ${{ needs.read-matrix.result }}
+          BUILD_RESULT: ${{ needs.build-and-test.result }}
+          HAS_CHANGES: ${{ needs.read-matrix.outputs.has_changes }}
         run: |
-          echo "::error Some required job has failed!"
-          exit 1
+          test "$CHECK_RESULT" = success
+          if [ "$HAS_CHANGES" = true ]; then
+            test "$BUILD_RESULT" = success
+          else
+            test "$HAS_CHANGES" = false
+            test "$BUILD_RESULT" = skipped
+          fi

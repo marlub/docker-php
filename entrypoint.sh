@@ -36,6 +36,6 @@ if [ -z "$APP_USER" ]; then
 fi
 
 # Fix access rights for stdout and stderr
-chown $APP_USER /proc/self/fd/1 /proc/self/fd/2
+chown "$APP_USER" /proc/self/fd/1 /proc/self/fd/2
 
 exec su "$APP_USER" /usr/local/bin/docker-php-original-entrypoint -- "$@"

@@ -1,0 +1,38 @@
+{
+  "image": "php:8.4.27-fpm-alpine3.24@sha256:6b83fd767e1902ae4c89fe11f929f02e78bf769215c703060ac8a7c4be672c8c",
+  "extensions": "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+  "packages": "",
+  "pie_packages": {
+    "redis": {
+      "package": "phpredis/phpredis",
+      "version": "6.3.0",
+      "configure_options": [
+        "--enable-redis-lzf",
+        "--with-liblzf=yes",
+        "--enable-redis-zstd",
+        "--with-libzstd=yes",
+        "--enable-redis-lz4",
+        "--with-liblz4=yes"
+      ]
+    },
+    "amqp": {
+      "package": "php-amqp/php-amqp",
+      "version": "2.2.0",
+      "configure_options": []
+    },
+    "xdebug": {
+      "package": "xdebug/xdebug",
+      "version": "3.5.3",
+      "configure_options": []
+    },
+    "pcov": {
+      "package": "pecl/pcov",
+      "version": "1.0.12",
+      "configure_options": []
+    }
+  },
+  "xhprof": {
+    "tag": "v2.3.10",
+    "commit": "da774867b337de4a1caeb5dfdd6a3f6793f73391"
+  }
+}

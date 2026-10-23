@@ -1,4 +1,4 @@
-name: Template for images
+name: Build, test, and publish one variant
 
 on:
   workflow_call:
@@ -12,122 +12,156 @@ on:
       image:
         required: true
         type: string
-      matrix:
+      variant:
         required: true
         type: string
       source-ref:
         required: true
         type: string
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  ENTRY: ${{ inputs.variant }}
+  IMAGE: ${{ inputs.registry }}/${{ inputs.image }}
+  TAG_MINOR: ${{ fromJson(inputs.variant).tagMinor }}
+  TAG_PATCH: ${{ fromJson(inputs.variant).tagPatch }}
+
 jobs:
   build-and-test:
-    name: ${{ matrix.phpimage.tagMinor }} (${{ matrix.platform }})
-    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' }}
+    name: ${{ fromJson(inputs.variant).tagMinor }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false
       matrix:
-        phpimage: ${{ fromJson(inputs.matrix).phpimages }}
-        platform:
-          - linux/amd64
-          - linux/arm64
+        arch: [amd64, arm64]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source-ref }}
-
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build for testing
+      - uses: docker/setup-buildx-action@v4
+      - name: Build once for local testing and later transfer
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          load: true
+          platforms: linux/${{ matrix.arch }}
+          target: ${{ fromJson(inputs.variant).node != '' && 'php-node' || 'php' }}
           no-cache: true
-          target: ${{ matrix.phpimage.node != '' && 'php-node' || 'php' }}
-
-          add-hosts: pecl.php.net:127.0.0.1
-          labels: ${{ matrix.phpimage.build_labels }}
-          build-args: |
-            PHP_BASE_IMAGE=${{ matrix.phpimage.resolved.php_images[matrix.platform] }}
-            NODE_BASE_IMAGE=${{ matrix.phpimage.resolved.node_images[matrix.platform] }}
-            ${{ matrix.phpimage.dependency_build_arg }}
-            EXTENSIONS=${{ matrix.phpimage.extensions }}
-            PACKAGES=${{ matrix.phpimage.packages }}
-            OS=${{ matrix.phpimage.os }}
-            NODE_VERSION=${{ matrix.phpimage.node }}
-
+          provenance: false
+          outputs: |
+            type=docker
+            type=oci,dest=${{ runner.temp }}/image.tar
           tags: test
-
-      - name: Test build
+          add-hosts: pecl.php.net:127.0.0.1
+          labels: |
+            io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}
+            org.opencontainers.image.revision=${{ inputs.source-ref }}
+          build-args: |
+            PHP_BASE_IMAGE=${{ fromJson(inputs.variant).php_image }}
+            NODE_BASE_IMAGE=${{ fromJson(inputs.variant).node_image }}
+            EXTENSIONS=${{ fromJson(inputs.variant).extensions }}
+            PACKAGES=${{ fromJson(inputs.variant).packages }}
+      - name: Test built image
         env:
-          NODE: ${{ matrix.phpimage.node }}
-          EXTENSIONS: ${{ matrix.phpimage.extensions }}
-          BUILD_INPUTS: ${{ matrix.phpimage.build_inputs }}
-          FINGERPRINT: ${{ matrix.phpimage.fingerprint }}
+          NODE: ${{ fromJson(inputs.variant).node }}
+          EXTENSIONS: ${{ fromJson(inputs.variant).extensions }}
         run: |
+          docker run --rm --entrypoint php -v "$PWD:/work:ro" test /work/tests/test_apk_lock.php
+          docker run --rm --entrypoint sh -v "$PWD:/work:ro" test /work/tests/test_installer.sh
           scripts/test_image.sh --node="$NODE" --extensions="$EXTENSIONS" --image=test
-          python3 scripts/verify_image.py --image test --inputs "$BUILD_INPUTS" --fingerprint "$FINGERPRINT"
-
-      - name: Log in to GHCR
-        if: ${{ inputs.publish }}
-        uses: docker/login-action@v4
+          python3 scripts/verify_image.py --image test --entry "$ENTRY"
+      - uses: docker/login-action@v4
+        if: inputs.publish
         with:
           registry: ${{ inputs.registry }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push digest
-        if: ${{ inputs.publish }}
-        id: build
-        uses: docker/build-push-action@v7
+      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main
+        if: inputs.publish
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          target: ${{ matrix.phpimage.node != '' && 'php-node' || 'php' }}
-          tags: ${{ inputs.registry }}/${{ inputs.image }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-
-          add-hosts: pecl.php.net:127.0.0.1
-          labels: ${{ matrix.phpimage.build_labels }}
-          build-args: |
-            PHP_BASE_IMAGE=${{ matrix.phpimage.resolved.php_images[matrix.platform] }}
-            NODE_BASE_IMAGE=${{ matrix.phpimage.resolved.node_images[matrix.platform] }}
-            ${{ matrix.phpimage.dependency_build_arg }}
-            EXTENSIONS=${{ matrix.phpimage.extensions }}
-            PACKAGES=${{ matrix.phpimage.packages }}
-            OS=${{ matrix.phpimage.os }}
-            NODE_VERSION=${{ matrix.phpimage.node }}
-
-      - name: Export digest
-        if: ${{ inputs.publish }}
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-          TAG_MINOR: ${{ matrix.phpimage.tagMinor }}
-          TAG_PATCH: ${{ matrix.phpimage.tagPatch }}
-          FINGERPRINT: ${{ matrix.phpimage.fingerprint }}
-          BUILD_INPUTS: ${{ matrix.phpimage.build_inputs }}
+          release: v0.11.7
+      - name: Upload the tested image by digest
+        if: inputs.publish
         run: |
-          mkdir -p "$RUNNER_TEMP/digests/$TAG_MINOR"
-          jq -c -n \
-            --arg platform "$PLATFORM" \
-            --arg digest "$DIGEST" \
-            --arg tagMinor "$TAG_MINOR" \
-            --arg tagPatch "$TAG_PATCH" \
-            --arg fingerprint "$FINGERPRINT" \
-            --arg build_inputs "$BUILD_INPUTS" \
-            '$ARGS.named' > "$RUNNER_TEMP/digests/$TAG_MINOR/${{ strategy.job-index }}.json"
-
-      - name: Upload digest
-        if: ${{ inputs.publish }}
-        uses: actions/upload-artifact@v7
+          mkdir -p "$RUNNER_TEMP/oci"
+          tar -xf "$RUNNER_TEMP/image.tar" -C "$RUNNER_TEMP/oci"
+          digest=$(jq -er '.manifests | if length == 1 then .[0].digest else error("Ambiguous candidate") end' "$RUNNER_TEMP/oci/index.json")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          config=$(jq -er '.config.digest' "$RUNNER_TEMP/oci/blobs/sha256/${digest#sha256:}")
+          test "$config" = "$(docker image inspect test --format '{{.Id}}')"
+          regctl image copy "ocidir://$RUNNER_TEMP/oci@$digest" "$IMAGE@$digest"
+          printf '%s\n' "$digest" > "$RUNNER_TEMP/${{ matrix.arch }}.digest"
+      - uses: actions/upload-artifact@v7
+        if: inputs.publish
         with:
-          name: digests-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
+          name: digests-${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/${{ matrix.arch }}.digest
+          overwrite: true
           retention-days: 1
+
+  publish:
+    name: Publish ${{ fromJson(inputs.variant).tagMinor }}
+    needs: build-and-test
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source-ref }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v8
+        with:
+          name: digests-${{ fromJson(inputs.variant).tagMinor }}-amd64
+          path: ${{ runner.temp }}/digests
+      - uses: actions/download-artifact@v8
+        with:
+          name: digests-${{ fromJson(inputs.variant).tagMinor }}-arm64
+          path: ${{ runner.temp }}/digests
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Verify candidate metadata
+        run: |
+          for arch in amd64 arm64; do
+            digest=$(cat "$RUNNER_TEMP/digests/$arch.digest")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker buildx imagetools inspect "$IMAGE@$digest" --format '{{json .Image}}' |
+              python3 scripts/verify_image.py --metadata --entry "$ENTRY" --platform "linux/$arch"
+          done
+      - name: Check current main
+        id: current
+        run: python3 scripts/select_images.py --check-current "$ENTRY" --github-output "$GITHUB_OUTPUT"
+      - name: Publish and verify tags
+        if: steps.current.outputs.superseded == 'false'
+        run: |
+          amd64=$(cat "$RUNNER_TEMP/digests/amd64.digest")
+          arm64=$(cat "$RUNNER_TEMP/digests/arm64.digest")
+          docker buildx imagetools create --tag "$IMAGE:$TAG_MINOR" --tag "$IMAGE:$TAG_PATCH" "$IMAGE@$amd64" "$IMAGE@$arm64"
+          indexes=()
+          for tag in "$TAG_MINOR" "$TAG_PATCH"; do
+            manifest=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest}}')
+            jq -e --arg amd64 "$amd64" --arg arm64 "$arm64" '
+              [.manifests[] | {platform: (.platform.os + "/" + .platform.architecture), digest}] | sort_by(.platform) ==
+              [{platform: "linux/amd64", digest: $amd64}, {platform: "linux/arm64", digest: $arm64}]
+            ' <<< "$manifest" > /dev/null
+            indexes+=("$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")")
+          done
+          test "${indexes[0]}" = "${indexes[1]}"
+      - name: Publication summary
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+          SUPERSEDED: ${{ steps.current.outputs.superseded }}
+        run: |
+          if [ "$STATUS" != success ]; then result=Failed
+          elif [ "$SUPERSEDED" = true ]; then result=Superseded
+          else result=Published; fi
+          printf '| Variant | Result |\n| --- | --- |\n| %s | %s |\n' "$TAG_MINOR" "$result" >> "$GITHUB_STEP_SUMMARY"

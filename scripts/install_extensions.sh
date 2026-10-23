@@ -1,119 +1,198 @@
 #!/bin/sh
-# Package and module lists intentionally use whitespace-separated arguments.
+# Lists from validated configuration and public build arguments intentionally split.
 # shellcheck disable=SC2086
-set -eu
+set -efu
 
-build_dir=/tmp/php-build
-jobs=$(getconf _NPROCESSORS_ONLN)
-if [ "$jobs" -gt 8 ]; then jobs=8; fi
-export PHP_BUILD_JOBS="$jobs"
-config=$(php "$build_dir/build_config.php")
-eval "$config"
-
-# Make an accidental use of the legacy clients fail immediately.
-rm -f /usr/local/bin/pecl /usr/local/bin/pear /usr/local/bin/peardev
-
-fetch() {
-    curl --fail --show-error --location --retry 3 --connect-timeout 15 "$1" -o "$3"
-    printf '%s  %s\n' "$2" "$3" | sha256sum -c -
+fail() {
+    echo "$*" >&2
+    exit 1
 }
 
-has() {
-    case " ${EXTENSIONS:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+extension_plan() {
+    jq -es --arg extensions "$3" --argjson php "$2" '
+        if length != 1 or (.[0] | type) != "object" then
+            error("Expected one PHP manifest object")
+        else .[0] end |
+        . as $config |
+        ($extensions | [splits("\\s+") | select(length > 0)]) as $selected |
+        if all($selected[]; test("^[a-z][a-z0-9_]*\\z")) | not then
+            error("Invalid extension name")
+        elif $php >= 80500 and ($selected | index("opcache")) != null then
+            error("PHP 8.5+ opcache is built in")
+        else . end |
+        (reduce $selected[] as $name ([];
+            if $config.pie_packages[$name] == null or index($name) != null then .
+            else . + [$name] end)) as $external |
+        if all($external[]; $config.pie_packages[.] |
+            (.package | test("^[a-z0-9_.-]+/[a-z0-9_.-]+\\z")) and
+            (.version | test("^[0-9]+(\\.[0-9]+){1,3}\\z")) and
+            (.configure_options | type == "array" and all(.[];
+                test("^--[a-z0-9-]+(=[a-z0-9/.+-]+)?\\z")))) | not then
+            error("Invalid PIE pin or configure option")
+        elif ($selected | index("xhprof")) != null and
+            (($config.xhprof.commit | test("^[a-f0-9]{40}\\z")) and
+             ($config.xhprof.tag | test("^v?[0-9]+\\.[0-9]+\\.[0-9]+\\z")) | not) then
+            error("Invalid XHProf source pin")
+        else {
+            core: [$selected[] | . as $name | select($name != "xhprof" and ($external | index($name)) == null)],
+            external: $external,
+            xhprof: (($selected | index("xhprof")) != null)
+        } end
+    ' "$1"
 }
 
-build_packages=''
-if [ -f /etc/alpine-release ]; then
-    distro=alpine
-    if [ -n "${EXTENSIONS:-}" ]; then
-        build_packages="$PHPIZE_DEPS automake libtool unzip linux-headers pax-utils"
-    fi
-    has gd && build_packages="$build_packages freetype-dev libjpeg-turbo-dev libpng-dev libxpm-dev libwebp-dev libavif-dev"
-    has intl && build_packages="$build_packages icu-dev icu-data-full"
-    has ldap && build_packages="$build_packages openldap-dev"
-    has zip && build_packages="$build_packages libzip-dev"
-    has pdo_pgsql && build_packages="$build_packages postgresql-dev"
-    has amqp && build_packages="$build_packages rabbitmq-c-dev"
-    has redis && build_packages="$build_packages liblzf-dev zstd-dev lz4-dev"
-    if [ -n "${PACKAGES:-}" ]; then apk add --no-cache $PACKAGES; fi
-    if [ -n "$build_packages" ]; then apk add --no-cache --virtual .php-extension-build $build_packages; fi
-else
-    distro=debian
-    saved_manual=$(apt-mark showmanual)
-    if [ -n "${EXTENSIONS:-}" ]; then
-        build_packages="$PHPIZE_DEPS automake libtool unzip"
-    fi
-    has gd && build_packages="$build_packages libfreetype6-dev libjpeg62-turbo-dev libpng-dev libxpm-dev libwebp-dev libavif-dev"
-    has intl && build_packages="$build_packages libicu-dev"
-    has ldap && build_packages="$build_packages libldap2-dev"
-    has zip && build_packages="$build_packages libzip-dev"
-    has pdo_pgsql && build_packages="$build_packages libpq-dev"
-    has amqp && build_packages="$build_packages librabbitmq-dev"
-    has redis && build_packages="$build_packages liblzf-dev libzstd-dev liblz4-dev"
-    if [ -n "$build_packages${PACKAGES:-}" ]; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update
-        apt-get install -y --no-install-recommends $build_packages ${PACKAGES:-}
-    fi
-fi
+read_configuration() {
+    [ -f /etc/alpine-release ] || fail 'Only Alpine PHP base images are supported.'
+    directory=$(CDPATH='' cd -P "$(dirname "$0")" && pwd)
+    minor=$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')
+    php_version=$(php -r 'echo PHP_VERSION_ID;')
+    config="$directory/build/php/$minor.json"
+    baseline="$directory/baseline.json"
+    release=$(cut -d. -f1,2 /etc/alpine-release)
+    architecture=$(apk --print-arch)
+    jobs=$(getconf _NPROCESSORS_ONLN)
+    [ "$jobs" -ge 1 ] || jobs=1
+    [ "$jobs" -le 8 ] || jobs=8
+    EXTENSIONS=${EXTENSIONS:-}
+    PACKAGES=${PACKAGES:-}
 
-if [ -n "$BUILD_CORE" ]; then
+    php "$directory/apk_lock.php" capture "$baseline"
+    apk add --no-cache --virtual .php-installer-tools jq
+
+    extension_plan "$config" "$php_version" "$EXTENSIONS" > "$directory/selection.json"
+    core=$(jq -r '.core | join(" ")' "$directory/selection.json")
+    jq -r '.external[]' "$directory/selection.json" > "$directory/external.txt"
+    xhprof=$(jq -r '.xhprof' "$directory/selection.json")
+    export XDG_CONFIG_HOME="$directory/config" XDG_CACHE_HOME="$directory/cache"
+}
+
+install_packages() {
+    set -- $EXTENSIONS $PACKAGES
+    if [ "$#" -eq 0 ]; then
+        lock="$directory/empty-lock.json"
+        jq -n --arg alpine "$release" --arg architecture "$architecture" \
+            '{alpine: $alpine, architecture: $architecture, packages: {}}' > "$lock"
+        return
+    fi
+    case "$architecture" in
+        x86_64) arch=amd64 ;;
+        aarch64) arch=arm64 ;;
+        *) fail "Unsupported APK architecture: $architecture" ;;
+    esac
+    lock="$directory/build/apk/$release/$arch.json"
+    jq -er '
+        .packages | if type == "object" and all(to_entries[];
+            (.key | test("^[a-zA-Z0-9+_.-]+\\z")) and
+            (.value | test("^[a-zA-Z0-9+_.~-]+-r[0-9]+\\z"))) then
+            to_entries | map(.key + "=" + .value) | join("\n")
+        else error("Invalid APK pin") end
+    ' "$lock" > "$directory/pins.txt"
+    php "$directory/apk_lock.php" check "$baseline" "$lock"
+    set --
+    while IFS= read -r pin; do
+        [ -z "$pin" ] || set -- "$@" "$pin"
+    done < "$directory/pins.txt"
+    # These public interfaces intentionally accept whitespace-separated lists.
+    # shellcheck disable=SC2086
+    apk add --no-cache --virtual .php-extension-runtime "$@" $PACKAGES
+    set -- $EXTENSIONS
+    if [ "$#" -gt 0 ]; then
+        build_packages=$(sh "$directory/alpine_packages.sh" build)
+        # shellcheck disable=SC2086
+        apk add --no-cache --virtual .php-extension-build $build_packages
+    fi
+}
+
+install_bundled() {
+    set -- $core
+    [ "$#" -gt 0 ] || return 0
     docker-php-source extract
-    if has gd; then
-        docker-php-ext-configure gd --enable-gd --with-webp --with-jpeg --with-xpm --with-freetype --with-avif
-    fi
-    if has ldap && [ "$distro" = debian ]; then
-        docker-php-ext-configure ldap --with-libdir="lib/$(dpkg-architecture --query DEB_BUILD_MULTIARCH)"
-    fi
-    docker-php-ext-install -j"$jobs" $BUILD_CORE
-fi
+    case " $core " in
+        *' gd '*) docker-php-ext-configure gd --enable-gd --with-webp --with-jpeg \
+            --with-xpm --with-freetype --with-avif ;;
+    esac
+    docker-php-ext-install "-j$jobs" "$@"
+}
 
-if [ -n "$BUILD_EXTERNAL" ]; then
-    fetch "$PIE_URL" "$PIE_SHA256" "$build_dir/pie.phar"
-    # PIE's temporary home is removed with the sources and registry after building.
-    export XDG_CONFIG_HOME="$build_dir/config" XDG_CACHE_HOME="$build_dir/cache"
-    if ! sh "$build_dir/install-pie.sh"; then
-        find /tmp -maxdepth 1 -type f -name 'pie_*_output_*' -exec cat '{}' ';'
-        exit 1
-    fi
-fi
+install_pie() {
+    while IFS= read -r extension; do
+        jq -er --arg name "$extension" '
+            .pie_packages[$name] | [.package + ":" + .version] + .configure_options | .[]
+        ' "$config" > "$directory/pie-arguments.txt"
+        set --
+        while IFS= read -r argument; do
+            set -- "$@" "$argument"
+        done < "$directory/pie-arguments.txt"
+        if php /tmp/pie.phar --no-interaction --no-ansi install --no-cache \
+            --skip-enable-extension "--make-parallel-jobs=$jobs" "$@"; then
+            docker-php-ext-enable "$extension"
+        else
+            # Globbing is enabled only for PIE's diagnostic files.
+            set +f
+            for log in /tmp/pie_*_output_*; do
+                [ ! -f "$log" ] || cat "$log" >&2
+            done
+            fail "PIE installation failed: $extension"
+        fi
+    done < "$directory/external.txt"
+}
 
-if [ "$BUILD_XHPROF" = 1 ]; then
-    fetch "$XHPROF_URL" "$XHPROF_SHA256" "$build_dir/xhprof.tar.gz"
-    mkdir "$build_dir/xhprof"
-    tar -xzf "$build_dir/xhprof.tar.gz" --strip-components=1 -C "$build_dir/xhprof"
-    (
-        cd "$build_dir/xhprof/extension"
-        phpize
-        ./configure --with-php-config=/usr/local/bin/php-config
-        make -j"$jobs"
-        make install
-    )
-    cp -a "$build_dir/xhprof/xhprof_lib" "$build_dir/xhprof/xhprof_html" /usr/local/lib/php/
+xhprof_record() {
+    version=$(sed -n 's/^#define[[:space:]][[:space:]]*XHPROF_VERSION[[:space:]][[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$1")
+    [ -n "$version" ] || fail 'Missing XHProf module version'
+    case "$version" in
+        *'
+'*) fail 'Ambiguous XHProf module version' ;;
+    esac
+    jq --arg version "$version" '.xhprof + {version: $version}' "$2"
+}
+
+compile_xhprof() (
+    cd "$1"
+    phpize
+    ./configure --with-php-config=/usr/local/bin/php-config
+    make "-j$jobs"
+    make install
+)
+
+install_xhprof() {
+    [ "$xhprof" = true ] || return 0
+    commit=$(jq -er '.xhprof.commit' "$config")
+    checkout="$directory/xhprof"
+    git init "$checkout"
+    git -C "$checkout" remote add origin https://github.com/longxinH/xhprof.git
+    git -C "$checkout" fetch --depth=1 origin "$commit"
+    git -C "$checkout" checkout --detach FETCH_HEAD
+    [ "$(git -C "$checkout" rev-parse HEAD)" = "$commit" ] || fail 'XHProf checkout mismatch'
+    xhprof_record "$checkout/extension/php_xhprof.h" "$config" > /usr/local/lib/php/xhprof-build.json
+    compile_xhprof "$checkout/extension"
+    cp -a "$checkout/xhprof_lib" "$checkout/xhprof_html" /usr/local/lib/php/
     docker-php-ext-enable xhprof
-fi
+}
 
-if [ -n "${EXTENSIONS:-}" ]; then
-    fetch "$COMPOSER_URL" "$COMPOSER_SHA256" /usr/local/bin/composer
-    chmod 0755 /usr/local/bin/composer
-fi
+cleanup() {
+    set -- $EXTENSIONS
+    if [ "$#" -gt 0 ]; then
+        cp /tmp/composer /usr/local/bin/composer
+        chmod 0755 /usr/local/bin/composer
+    fi
+    docker-php-source delete
+    if [ "$#" -gt 0 ]; then
+        apk del --no-network .php-extension-build
+    fi
+    apk del --no-network .php-installer-tools
+    php "$directory/apk_lock.php" runtime "$baseline" "$lock"
+    rm -rf "$directory" /root/.cache /root/.config/pie
+}
 
-docker-php-source delete
-if [ "$distro" = alpine ] && [ -n "$build_packages" ]; then
-    # Keep only shared libraries actually required by the compiled modules.
-    needed=$(scanelf --needed --nobanner --format '%n#p' --recursive /usr/local/lib/php/extensions)
-    runtime_deps=$(printf '%s\n' "$needed" | tr ',' '\n' | sort -u \
-        | awk 'NF && system("test -e /usr/local/lib/" $1) != 0 { print "so:" $1 }')
-    apk add --no-cache --virtual .php-extension-runtime $runtime_deps
-    if has intl; then apk add --no-cache icu-data-full; fi
-    apk del .php-extension-build
-elif [ "$distro" = debian ] && [ -n "$build_packages" ]; then
-    apt-mark auto '.*' > /dev/null
-    apt-mark manual $saved_manual ${PACKAGES:-}
-    find /usr/local/lib/php/extensions -name '*.so' -exec ldd '{}' ';' \
-        | awk '/=>/ { path=$(NF-1); if (index(path, "/usr/local/") == 1) next; sub("^/(usr/)?", "", path); print "*" path }' | sort -u \
-        | xargs -r dpkg-query --search \
-        | cut -d: -f1 | sort -u | xargs -r apt-mark manual
-    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
+# Sourcing defines functions without installing extensions.
+if [ "${0##*/}" = install_extensions.sh ]; then
+    read_configuration
+    rm -f /usr/local/bin/pecl /usr/local/bin/pear /usr/local/bin/peardev
+    install_packages
+    install_bundled
+    install_pie
+    install_xhprof
+    cleanup
 fi
-rm -rf "$build_dir" /root/.cache /root/.config/pie /var/lib/apt/lists/*

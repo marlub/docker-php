@@ -1,54 +1,15 @@
 #!/usr/bin/env python3
-"""Resolve build inputs and select images that differ from their published tags."""
-
+"""Select image variants from Git changes; dependency discovery belongs to Renovate."""
 import argparse
-import base64
-import csv
-import hashlib
-import io
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tarfile
-import time
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-import xml.etree.ElementTree as ET
-
 
 PLATFORMS = ("linux/amd64", "linux/arm64")
-LABEL_PREFIX = "io.github.marlub.docker-php."
-FINGERPRINT_LABEL = LABEL_PREFIX + "inputs-sha256"
-INPUTS_LABEL = LABEL_PREFIX + "inputs"
-BUNDLED = frozenset("""
-    bcmath bz2 calendar ctype curl dba dom enchant exif ffi fileinfo filter ftp gd
-    gettext gmp hash iconv imap intl json ldap mbstring mysqli oci8 odbc opcache
-    openssl pcntl pdo pdo_dblib pdo_firebird pdo_mysql pdo_oci pdo_odbc pdo_pgsql
-    pdo_sqlite pgsql phar posix pspell readline reflection session shmop simplexml
-    snmp soap sockets sodium spl sqlite3 standard sysvmsg sysvsem sysvshm tidy
-    tokenizer xml xmlreader xmlwriter xsl zip zlib
-""".split())
-MOVED_FROM_CORE = frozenset(("imap", "oci8", "pdo_oci", "pspell"))
-PIE_PACKAGES = {
-    "redis": "phpredis/phpredis", "amqp": "php-amqp/php-amqp",
-    "xdebug": "xdebug/xdebug", "pcov": "pecl/pcov",
-}
-PIE_OPTIONS = {"redis": [
-    "--enable-redis-lzf", "--with-liblzf=yes", "--enable-redis-zstd", "--with-libzstd=yes",
-    "--enable-redis-lz4", "--with-liblz4=yes",
-]}
-PIE_API = "https://api.github.com/repos/php/pie/releases/latest"
-XHPROF_API = "https://api.github.com/repos/longxinH/xhprof"
-SOURCE_FILES = (
-    "Dockerfile", "entrypoint.sh", "scripts/test_image.sh",
-    "scripts/select_images.py", "scripts/publish_images.py", "scripts/verify_image.py",
-    "scripts/install_extensions.sh", "scripts/build_config.php", "scripts/build-defaults.json",
-    ".github/workflows/build-test-publish.yml",
-    ".github/workflows/build-test.yml", ".github/workflows/template-images.yml",
-)
+REVISION_LABEL = "org.opencontainers.image.revision"
+VARIANT_LABEL = "io.github.marlub.docker-php.variant"
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -60,430 +21,154 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def sha256(value):
-    return hashlib.sha256(value).hexdigest()
+def git(root, *args):
+    return subprocess.check_output(['git', '-C', str(root), *args], text=True, stderr=subprocess.PIPE)
 
 
-def version_tuple(value):
-    match = re.fullmatch(r"(\d+(?:\.\d+){0,3})(?:[-.]?(dev|alpha|a|beta|b|rc|pl|p)(\d*))?", value, re.I)
-    if not match:
-        raise ResolutionError(f"Unsupported release version: {value!r}")
-    parts = tuple(map(int, match[1].split(".")))
-    stage = {"dev": -4, "alpha": -3, "a": -3, "beta": -2, "b": -2,
-             "rc": -1, "": 0, "pl": 1, "p": 1}[(match[2] or "").lower()]
-    return parts + (0,) * (4 - len(parts)) + (stage, int(match[3] or 0))
+def manifests(root):
+    dockerfile = (root / 'Dockerfile').read_text()
+    tools = dict(re.findall(r'^ARG (PIE_IMAGE|COMPOSER_IMAGE|NODE_BASE_IMAGE)="([^"\n]+)"$', dockerfile, re.M))
+    if set(tools) != {'PIE_IMAGE', 'COMPOSER_IMAGE', 'NODE_BASE_IMAGE'}:
+        raise ResolutionError('Missing pinned tool image arguments')
+    for reference in tools.values():
+        if not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', reference):
+            raise ResolutionError('Tool images must have version tags and digests')
+    source_ref = git(root, 'rev-parse', '--verify', 'HEAD^{commit}').strip()
+    entries = []
+    for path in sorted((root / 'build/php').glob('*.json')):
+        config = json.loads(path.read_text())
+        match = re.fullmatch(r'php:((8\.\d+)\.\d+)-fpm-alpine(\d+\.\d+)@sha256:[a-f0-9]{64}', config['image'])
+        if not match or match[2] != path.stem:
+            raise ResolutionError(f'PHP manifest does not match its image: {path}')
+        version, minor, alpine = match.groups()
+        names = config['extensions'].split()
+        if len(set(names)) != len(names) or any(not re.fullmatch(r'[a-z][a-z0-9_]*', name) for name in names):
+            raise ResolutionError('Extensions must be unique module names')
+        if minor == '8.5' and 'opcache' in names:
+            raise ResolutionError('PHP 8.5 opcache is built in')
+        for package in config['pie_packages'].values():
+            if not re.fullmatch(r'\d+(?:\.\d+){1,3}', package['version']):
+                raise ResolutionError('PIE versions must be exact stable pins')
+        if not re.fullmatch(r'v?\d+\.\d+\.\d+', config['xhprof']['tag']) or not re.fullmatch(r'[a-f0-9]{40}', config['xhprof']['commit']):
+            raise ResolutionError('XHProf requires a stable tag and full commit')
+        for arch, apk_arch in [('amd64', 'x86_64'), ('arm64', 'aarch64')]:
+            lock = json.loads((root / f'build/apk/{alpine}/{arch}.json').read_text())
+            if lock['alpine'] != alpine or lock['architecture'] != apk_arch or not lock['packages']:
+                raise ResolutionError('APK lock release/architecture mismatch')
+            if any(not re.fullmatch(r'[a-zA-Z0-9+_.-]+', name) or not re.fullmatch(r'[a-zA-Z0-9+_.~-]+-r\d+', value)
+                   for name, value in lock['packages'].items()):
+                raise ResolutionError('APK packages require exact revision pins')
+        node_match = re.fullmatch(r'node:(24\.\d+\.\d+)-alpine' + re.escape(alpine) + r'@sha256:[a-f0-9]{64}', tools['NODE_BASE_IMAGE'])
+        if not node_match:
+            raise ResolutionError('Node must stay on major 24 and the PHP Alpine release')
+        for node in ['', '24']:
+            suffix = '-fpm-alpine' + ('-node24' if node else '')
+            entries.append({'minor': minor, 'php_version': version, 'alpine': alpine,
+                            'php_image': config['image'], 'node_image': tools['NODE_BASE_IMAGE'],
+                            'node': node, 'node_version': node_match[1] if node else '',
+                            'extensions': config['extensions'], 'packages': config.get('packages', ''),
+                            'tagMinor': minor + suffix, 'tagPatch': version + suffix,
+                            'source_ref': source_ref,
+                            'extension_versions': {name: data['version'] for name, data in config['pie_packages'].items() if name in names},
+                            'xhprof': config['xhprof'] if 'xhprof' in names else None,
+                            'composer_version': tools['COMPOSER_IMAGE'].split('@')[0].rsplit(':', 1)[1].removesuffix('-bin')})
+    if not entries:
+        raise ResolutionError('No PHP manifests found')
+    return entries
 
 
-def tags(entry):
-    suffix = "-".join(filter(None, (
-        entry["variant"], entry["os"], "node" + entry["node"] if entry["node"] else "",
-    )))
-    minor = f'{entry["major"]}.{entry["minor"]}'
-    return f'{minor}-{suffix}'.rstrip("-"), f'{minor}.{entry["patch"]}-{suffix}'.rstrip("-")
+def plain_dockerfile(text):
+    """Separate the known Node stages; unfamiliar structures affect all variants."""
+    stages = list(re.finditer(r'^FROM \$\{NODE_BASE_IMAGE[^}\n]*\} AS node\n', text, re.M))
+    if len(stages) != 1 or len(re.findall(r'^ARG NODE_BASE_IMAGE=', text, re.M)) != 1:
+        return None
+    start = stages[0].start()
+    tail_stages = re.findall(r'^FROM [^\n]+', text[start:], re.M)
+    if len(tail_stages) != 2 or tail_stages[1] != 'FROM php AS php-node':
+        return None
+    plain = re.sub(r'^ARG NODE_(?:BASE_IMAGE|VERSION)=[^\n]*\n', '', text[:start], flags=re.M)
+    if 'NODE_BASE_IMAGE' in plain or 'NODE_VERSION' in plain:
+        return None
+    return plain
 
 
-class HTTP:
-    def __init__(self):
-        self.cache = {}
-
-    def get(self, url):
-        if url in self.cache:
-            return self.cache[url]
-        headers = {"User-Agent": "docker-php-dependency-check"}
-        if url.startswith("https://api.github.com/") and os.environ.get("GH_TOKEN"):
-            headers["Authorization"] = "Bearer " + os.environ["GH_TOKEN"]
-        for attempt in range(3):
-            try:
-                with urlopen(Request(url, headers=headers), timeout=30) as response:
-                    data = response.read()
-                self.cache[url] = data
-                return data
-            except HTTPError as exc:
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
-                    raise ResolutionError(f"GET {url}: HTTP {exc.code}") from exc
-            except (URLError, TimeoutError, OSError) as exc:
-                if attempt == 2:
-                    raise ResolutionError(f"GET {url}: {exc}") from exc
-            time.sleep(attempt + 1)
-        raise AssertionError("unreachable")
-
-    def json(self, url):
-        try:
-            return json.loads(self.get(url))
-        except ValueError as exc:
-            raise ResolutionError(f"Invalid JSON from {url}") from exc
-
-    def xml(self, url):
-        try:
-            root = ET.fromstring(self.get(url))
-        except ET.ParseError as exc:
-            raise ResolutionError(f"Invalid XML from {url}") from exc
-        # Upstream package.xml files may use a default namespace.
-        for element in root.iter():
-            element.tag = element.tag.rsplit("}", 1)[-1]
-        return root
+def affected_tags(entries, root, base_ref, head_ref='HEAD'):
+    head = git(root, 'rev-parse', '--verify', '--end-of-options', head_ref + '^{commit}').strip()
+    if base_ref == '0' * 40:
+        return {entry['tagMinor'] for entry in entries}
+    base = git(root, 'rev-parse', '--verify', '--end-of-options', base_ref + '^{commit}').strip()
+    paths = git(root, 'diff', '--name-only', '--no-renames', '-z', base, head, '--').split('\0')
+    affected = set()
+    for path in filter(None, paths):
+        minor = re.fullmatch(r'build/php/([^/]+)\.json', path)
+        alpine = re.fullmatch(r'build/apk/([^/]+)/[^/]+\.json', path)
+        if minor:
+            affected.update(entry['tagMinor'] for entry in entries if entry['minor'] == minor[1])
+        elif alpine:
+            affected.update(entry['tagMinor'] for entry in entries if entry['alpine'] == alpine[1])
+        elif path == 'Dockerfile':
+            before = subprocess.run(['git', '-C', str(root), 'show', base + ':Dockerfile'], capture_output=True, text=True)
+            after = subprocess.run(['git', '-C', str(root), 'show', head + ':Dockerfile'], capture_output=True, text=True)
+            plain_before = plain_dockerfile(before.stdout) if before.returncode == 0 else None
+            plain_after = plain_dockerfile(after.stdout) if after.returncode == 0 else None
+            node_only = plain_before is not None and plain_before == plain_after
+            affected.update(entry['tagMinor'] for entry in entries if not node_only or entry['node'])
+        elif path == 'entrypoint.sh' or path.startswith(('scripts/', 'tests/', '.github/workflows/', 'build/')):
+            affected.update(entry['tagMinor'] for entry in entries)
+    return affected
 
 
-class Registry:
-    """Use Buildx's registry authentication and fetch metadata, never image layers."""
-
-    def __init__(self):
-        self.cache = {}
-
-    def inspect(self, reference, field="Manifest", missing_ok=False):
-        key = (reference, field)
-        if key in self.cache:
-            return self.cache[key]
-        command = ["docker", "buildx", "imagetools", "inspect", reference,
-                   "--format", "{{json ." + field + "}}"]
-        for attempt in range(3):
-            try:
-                result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                if attempt == 2:
-                    raise ResolutionError(f"Cannot inspect {reference}: {exc}") from exc
-            else:
-                if result.returncode == 0:
-                    try:
-                        value = json.loads(result.stdout)
-                    except ValueError as exc:
-                        raise ResolutionError(f"Invalid registry metadata for {reference}") from exc
-                    if not isinstance(value, dict):
-                        raise ResolutionError(f"Invalid registry metadata for {reference}")
-                    self.cache[key] = value
-                    return value
-                error = result.stderr.strip()
-                # Do not turn authentication or generic network failures into cache misses.
-                missing = any(marker in error.lower() for marker in (
-                    "manifest unknown", "name unknown", "404 not found",
-                )) or error.endswith(f"{reference}: not found")
-                if missing_ok and missing:
-                    self.cache[key] = None
-                    return None
-                if attempt == 2:
-                    raise ResolutionError(f"Cannot inspect {reference}: {error}")
-            time.sleep(attempt + 1)
-        raise AssertionError("unreachable")
-
-    def bases(self, reference):
-        manifest = self.inspect(reference)
-        repository = reference.rsplit(":", 1)[0]
-        result = {}
-        for platform in PLATFORMS:
-            digest = platform_digest(manifest, platform)
-            if not digest:
-                raise ResolutionError(f"{reference} is missing {platform}")
-            result[platform] = f"{repository}@{digest}"
-        return result
+def select(entries, root, base_ref=None, php='All'):
+    if php != 'All' and php not in {entry['minor'] for entry in entries}:
+        raise ResolutionError(f'Unsupported PHP minor: {php}')
+    tags = affected_tags(entries, root, base_ref) if base_ref else {entry['tagMinor'] for entry in entries if php == 'All' or entry['minor'] == php}
+    return {'phpimages': [entry for entry in entries if entry['tagMinor'] in tags],
+            'report': [{'tag': entry['tagMinor'], 'state': 'Selected' if entry['tagMinor'] in tags else 'Not selected'} for entry in entries]}
 
 
-def platform_digest(manifest, platform):
-    matches = []
-    for child in manifest.get("manifests", []):
-        info = child.get("platform", {})
-        if f'{info.get("os")}/{info.get("architecture")}' == platform:
-            matches.append(child.get("digest", ""))
-    if len(matches) == 1 and DIGEST_RE.fullmatch(matches[0]):
-        return matches[0]
-    return None
-
-
-def compatible_php(package, php_version):
-    requirements = package.find("dependencies/required/php")
-    if requirements is None:
-        raise ResolutionError("Source package metadata has no PHP requirements")
-    actual = version_tuple(php_version)
-    minimum = requirements.findtext("min")
-    maximum = requirements.findtext("max")
-    if minimum and actual < version_tuple(minimum):
-        return False
-    if maximum and actual > version_tuple(maximum):
-        return False
-    return all(actual != version_tuple(item.text) for item in requirements.findall("exclude"))
-
-
-class PieRunner:
-    """Resolve with PIE in the Docker daemon's native PHP base, without building."""
-
-    def __init__(self, run=None):
-        self.run = run or subprocess.run
-        self.platform = None
-
-    def command(self, command, **kwargs):
-        try:
-            result = self.run(command, capture_output=True, text=True, timeout=300, **kwargs)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ResolutionError(f"PIE resolution failed: {exc}") from exc
-        if result.returncode:
-            raise ResolutionError(f"PIE resolution failed: {result.stderr.strip()} {result.stdout.strip()}")
-        return result.stdout
-
-    def native_platform(self):
-        if self.platform is None:
-            architecture = self.command(["docker", "info", "--format", "{{.Architecture}}"]).strip()
-            architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(architecture, architecture)
-            self.platform = "linux/" + architecture
-            if self.platform not in PLATFORMS:
-                raise ResolutionError(f"Unsupported Docker architecture: {architecture}")
-        return self.platform
-
-    def info(self, images, pie_bytes, package):
-        platform = self.native_platform()
-        # Stream the verified PHAR over stdin instead of relying on host bind mounts
-        # (the daemon may be Docker Desktop or remote).
-        script = (
-            "file_put_contents('/tmp/pie.phar', base64_decode(stream_get_contents(STDIN))); "
-            "require '/tmp/pie.phar';"
-        )
-        return self.command([
-            "docker", "run", "--rm", "-i", "--platform", platform,
-            "--add-host", "pecl.php.net:127.0.0.1", "--entrypoint", "php", images[platform],
-            "-r", script, "--", "--no-interaction", "--no-ansi", "info", package + ":*@stable",
-        ], input=base64.b64encode(pie_bytes).decode())
-
-
-def parse_pie_info(output, name, package):
-    values = {}
-    for label in ("Extension name", "Composer package name", "Version"):
-        matches = re.findall(r"^" + re.escape(label) + r": ([^\r\n]+)$", output, re.M)
-        if len(matches) != 1:
-            raise ResolutionError(f"Missing or ambiguous PIE {label} for {package}")
-        values[label] = matches[0].strip()
-    version = values["Version"].removeprefix("v")
-    if (values["Extension name"] != name or values["Composer package name"] != package
-            or not re.fullmatch(r"\d+(?:\.\d+){1,3}", version)):
-        raise ResolutionError(f"Unexpected PIE package, extension, or non-stable version for {name}")
-    return version
-
-
-class Resolver:
-    def __init__(self, http, registry, source_root, pie_runner=None):
-        self.http = http
-        self.registry = registry
-        self.pie_runner = pie_runner or PieRunner()
-        self.sources = {name: sha256((source_root / name).read_bytes()) for name in SOURCE_FILES}
-        self.releases = {}
-
-    def pie(self):
-        release = self.http.json(PIE_API)
-        version = release["tag_name"].removeprefix("v")
-        if release.get("prerelease") or release.get("draft") or not re.fullmatch(r"\d+\.\d+\.\d+", version):
-            raise ResolutionError("PIE release must be stable")
-        assets = [asset for asset in release["assets"] if asset["name"] == "pie.phar"]
-        if len(assets) != 1:
-            raise ResolutionError("PIE release must contain exactly one pie.phar asset")
-        url = assets[0]["browser_download_url"]
-        if url != f"https://github.com/php/pie/releases/download/{release['tag_name']}/pie.phar":
-            raise ResolutionError("PIE asset URL is not a versioned upstream PHAR")
-        content = self.http.get(url)
-        checksum = sha256(content)
-        if assets[0].get("digest") and assets[0]["digest"] != "sha256:" + checksum:
-            raise ResolutionError("PIE release asset checksum mismatch")
-        return {"version": version, "url": url, "sha256": checksum}, content
-
-    def extension(self, name, php_images, pie, pie_bytes):
-        key = (name, canonical(php_images), pie["sha256"])
-        if key not in self.releases:
-            package = PIE_PACKAGES[name]
-            output = self.pie_runner.info(php_images, pie_bytes, package)
-            version = parse_pie_info(output, name, package)
-            self.releases[key] = {
-                "package": package, "version": version,
-                "configure_options": PIE_OPTIONS.get(name, []),
-            }
-        return self.releases[key]
-
-    def xhprof(self, php_version):
-        key = ("xhprof", php_version)
-        if key in self.releases:
-            return self.releases[key]
-        tags = []
-        page = 1
-        while True:
-            batch = self.http.json(f"{XHPROF_API}/tags?per_page=100&page={page}")
-            tags.extend(item for item in batch if re.fullmatch(r"v?\d+\.\d+\.\d+", item["name"]))
-            if len(batch) < 100:
-                break
-            page += 1
-        tags.sort(key=lambda item: version_tuple(item["name"].removeprefix("v")), reverse=True)
-        for tag in tags:
-            commit = tag["commit"]["sha"]
-            if not re.fullmatch(r"[0-9a-f]{40}", commit):
-                raise ResolutionError("Invalid XHProf source commit")
-            base = f"https://raw.githubusercontent.com/longxinH/xhprof/{commit}/"
-            if not compatible_php(self.http.xml(base + "package.xml"), php_version):
-                continue
-            header = self.http.get(base + "extension/php_xhprof.h").decode()
-            versions = re.findall(r'^#define\s+XHPROF_VERSION\s+"(\d+\.\d+\.\d+)"', header, re.M)
-            if len(versions) != 1:
-                raise ResolutionError("Missing or ambiguous XHProf module version")
-            url = f"https://codeload.github.com/longxinH/xhprof/tar.gz/{commit}"
-            archive = self.http.get(url)
-            # Validate that the metadata used above belongs to the exact build archive.
-            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as source:
-                root = "xhprof-" + commit + "/"
-                for path in ("package.xml", "extension/php_xhprof.h"):
-                    file = source.extractfile(root + path)
-                    if file is None or file.read() != self.http.get(base + path):
-                        raise ResolutionError("XHProf archive metadata mismatch")
-            result = {"tag": tag["name"], "commit": commit, "url": url,
-                      "sha256": sha256(archive), "version": versions[0]}
-            self.releases[key] = result
-            return result
-        raise ResolutionError(f"No stable XHProf source supports PHP {php_version}")
-
-    def composer(self, entry):
-        if not entry["extensions"].strip():
-            return {"version": "", "url": "", "sha256": ""}
-        releases = self.http.json("https://getcomposer.org/versions")["stable"]
-        numeric_php = entry["major"] * 10000 + entry["minor"] * 100 + entry["patch"]
-        compatible = [item for item in releases if item["min-php"] <= numeric_php
-                      and re.fullmatch(r"\d+\.\d+\.\d+", item["version"])]
-        if not compatible:
-            raise ResolutionError("No stable Composer release supports this PHP version")
-        version = max(compatible, key=lambda item: version_tuple(item["version"]))["version"]
-        url = f"https://getcomposer.org/download/{version}/composer.phar"
-        checksum = sha256(self.http.get(url))
-        if self.http.get(url + ".sha256sum").decode().split()[0] != checksum:
-            raise ResolutionError("Composer PHAR checksum mismatch")
-        return {"version": version, "url": url, "sha256": checksum}
-
-    def resolve(self, entry):
-        if "pecl" in entry:
-            raise ResolutionError("The pecl matrix field was removed; use extensions")
-        minor_tag, patch_tag = tags(entry)
-        php_version = f'{entry["major"]}.{entry["minor"]}.{entry["patch"]}'
-        base_tag = "-".join(filter(None, (php_version, entry["variant"], entry["os"])))
-        php_images = self.registry.bases(f"php:{base_tag}")
-        node_images = {}
-        if entry["node"]:
-            node_images = self.registry.bases(f'node:{entry["node"]}-{entry["os"] or "slim"}')
-        names = entry["extensions"].split()
-        core, packages, versions, xhprof = [], {}, {}, {}
-        for name in names:
-            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
-                raise ResolutionError(f"Use plain extension names in matrix.json, got {name!r}")
-            bundled = name in BUNDLED and not (
-                name in MOVED_FROM_CORE and version_tuple(php_version) >= version_tuple("8.4")
-            )
-            if name not in PIE_PACKAGES and name != "xhprof" and not bundled:
-                raise ResolutionError(f"No PIE package or source builder configured for {name}")
-            if name == "opcache" and version_tuple(php_version) >= version_tuple("8.5"):
-                raise ResolutionError("PHP 8.5+ opcache is built in; remove it from extensions")
-            if bundled:
-                core.append(name)
-        pie, pie_bytes = self.pie() if any(name in PIE_PACKAGES for name in names) else ({}, b"")
-        for name in names:
-            if name in PIE_PACKAGES:
-                packages[name] = self.extension(name, php_images, pie, pie_bytes)
-                versions[name] = packages[name]["version"]
-            elif name == "xhprof":
-                xhprof = self.xhprof(php_version)
-                versions[name] = xhprof["version"]
-        composer = self.composer(entry)
-        resolved = {
-            "php_images": php_images, "node_images": node_images,
-            "composer": composer, "pie": pie, "pie_packages": packages,
-            "extensions_install": " ".join(core), "xhprof": xhprof,
-        }
-        inputs = {"schema": 2, "variant": entry, "resolved": resolved,
-                  "extension_versions": versions, "sources": self.sources}
-        build_inputs = canonical(inputs)
-        fingerprint = sha256(build_inputs.encode())
-        label_output = io.StringIO()
-        writer = csv.writer(label_output, lineterminator="\n")
-        writer.writerow([FINGERPRINT_LABEL + "=" + fingerprint])
-        writer.writerow([INPUTS_LABEL + "=" + build_inputs])
-        dependencies = canonical({
-            key: value for key, value in resolved.items() if key not in ("php_images", "node_images")
-        })
-        # The action parses build arguments as CSV too. Quote the whole argument
-        # so quotes around individual configure options in JSON arrays survive.
-        argument_output = io.StringIO()
-        csv.writer(argument_output, lineterminator="\n").writerow(["DEPENDENCIES=" + dependencies])
-        return {**entry, "tagMinor": minor_tag, "tagPatch": patch_tag,
-                "resolved": resolved, "dependencies": dependencies,
-                "dependency_build_arg": argument_output.getvalue().rstrip("\n"), "fingerprint": fingerprint,
-                "build_inputs": build_inputs, "build_labels": label_output.getvalue()}
-
-
-def selection_reason(entry, registry, image):
-    manifests = [registry.inspect(f'{image}:{entry[tag]}', missing_ok=True)
-                 for tag in ("tagMinor", "tagPatch")]
-    if any(manifest is None for manifest in manifests):
-        return "published tag missing"
-    digests = [manifest.get("digest", "") for manifest in manifests]
-    if not all(DIGEST_RE.fullmatch(digest) for digest in digests):
-        raise ResolutionError(f"Invalid published manifest digest for {entry['tagMinor']}")
-    if digests[0] != digests[1]:
-        return "minor and patch tags differ"
-    for platform in PLATFORMS:
-        digest = platform_digest(manifests[0], platform)
-        if not digest:
-            return f"published platform missing: {platform}"
-        config = registry.inspect(f"{image}@{digest}", "Image")
-        labels = config.get("config", {}).get("Labels", {}) or {}
-        if (labels.get(FINGERPRINT_LABEL) != entry["fingerprint"] or
-                labels.get(INPUTS_LABEL) != entry["build_inputs"]):
-            previous = labels.get(INPUTS_LABEL)
-            if not previous:
-                return "published dependency labels missing"
-            try:
-                before = json.loads(previous)
-                after = json.loads(entry["build_inputs"])
-            except ValueError:
-                return "published dependency labels invalid"
-            if not isinstance(before, dict):
-                return "published dependency labels invalid"
-            changed = [key for key in after if before.get(key) != after[key]]
-            return "changed inputs: " + ", ".join(changed or ["fingerprint"])
-    return None
-
-
-def select(entries, resolver, registry, image, select_all=False):
-    selected, report = [], []
-    for raw in entries:
-        entry = resolver.resolve(raw)
-        reason = "forced/full validation" if select_all else selection_reason(entry, registry, image)
-        report.append({"tag": entry["tagMinor"], "reason": reason or "unchanged", "selected": bool(reason)})
-        if reason:
-            selected.append(entry)
-    return {"phpimages": selected}, report
+def check_current(entry, root):
+    if not re.fullmatch(r'[a-f0-9]{40}', entry['source_ref']):
+        raise ResolutionError('Invalid candidate source commit')
+    git(root, 'fetch', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main')
+    return entry['tagMinor'] in affected_tags([entry], root, entry['source_ref'], 'refs/remotes/origin/main')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--matrix", default="matrix.json")
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--image", default="ghcr.io/marlub/php")
-    parser.add_argument("--select-all", action="store_true")
-    parser.add_argument("--github-output")
-    parser.add_argument("--summary")
+    parser.add_argument('--out')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--check-current', help='Check whether one variant JSON entry is superseded')
+    mode.add_argument('--base-ref')
+    mode.add_argument('--php', default='All', help='Rebuild one configured PHP minor, or All')
+    parser.add_argument('--github-output')
+    parser.add_argument('--summary')
     args = parser.parse_args()
+    root = Path(__file__).resolve().parent.parent
+    if not args.check_current and not args.out:
+        parser.error('--out is required for variant selection')
     try:
-        registry = Registry()
-        resolver = Resolver(HTTP(), registry, Path(__file__).resolve().parent.parent)
-        entries = json.loads(Path(args.matrix).read_text())["phpimages"]
-        matrix, report = select(entries, resolver, registry, args.image, args.select_all)
-        Path(args.out).write_text(canonical(matrix) + "\n")
+        if args.check_current:
+            superseded = check_current(json.loads(args.check_current), root)
+            if args.github_output:
+                with open(args.github_output, 'a') as output:
+                    output.write(f'superseded={str(superseded).lower()}\n')
+            print('Superseded' if superseded else 'Current')
+            return 0
+        result = select(manifests(root), root, args.base_ref, args.php)
+        Path(args.out).write_text(canonical(result) + '\n')
         if args.github_output:
-            with open(args.github_output, "a") as output:
-                output.write(f"matrix={canonical(matrix)}\n")
-                output.write(f"has_changes={str(bool(matrix['phpimages'])).lower()}\n")
-        lines = ["| Variant | Decision | Reason |", "| --- | --- | --- |"]
-        for item in report:
-            decision = "Build" if item["selected"] else "Skip"
-            lines.append(f"| {item['tag']} | {decision} | {item['reason']} |")
-        summary = "\n".join(lines) + "\n"
-        print(summary)
+            with open(args.github_output, 'a') as output:
+                output.write(f'matrix={canonical(result)}\n')
+                output.write(f'has_changes={str(bool(result["phpimages"])).lower()}\n')
+        report = '| Variant | Selection |\n| --- | --- |\n' + ''.join(f'| {row["tag"]} | {row["state"]} |\n' for row in result['report'])
+        print(report)
         if args.summary:
-            with open(args.summary, "a") as output:
-                output.write("### Dependency check\n\n" + summary)
-    except (ResolutionError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
-        print(f"Dependency check failed: {exc}", file=sys.stderr)
+            with open(args.summary, 'a') as output: output.write('### Variant selection\n\n' + report)
+    except (ResolutionError, KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f'Variant selection failed: {exc}', file=sys.stderr)
         return 1
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

@@ -1,0 +1,217 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "enabledManagers": [
+    "dockerfile",
+    "github-actions",
+    "custom.regex"
+  ],
+  "ignoreUnstable": true,
+  "pinDigests": true,
+  "automerge": false,
+  "platformAutomerge": false,
+  "rebaseWhen": "behind-base-branch",
+  "packageRules": [
+    {
+      "matchUpdateTypes": [
+        "patch",
+        "minor",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
+      "matchFileNames": [
+        "build/php/8.2.json"
+      ],
+      "additionalBranchPrefix": "php82-",
+      "constraints": {
+        "php": ">=8.2.0 <8.3.0"
+      }
+    },
+    {
+      "matchFileNames": [
+        "build/php/8.3.json"
+      ],
+      "additionalBranchPrefix": "php83-",
+      "constraints": {
+        "php": ">=8.3.0 <8.4.0"
+      }
+    },
+    {
+      "matchFileNames": [
+        "build/php/8.4.json"
+      ],
+      "additionalBranchPrefix": "php84-",
+      "constraints": {
+        "php": ">=8.4.0 <8.5.0"
+      }
+    },
+    {
+      "matchFileNames": [
+        "build/php/8.5.json"
+      ],
+      "additionalBranchPrefix": "php85-",
+      "constraints": {
+        "php": ">=8.5.0 <8.6.0"
+      }
+    },
+    {
+      "matchDatasources": [
+        "packagist"
+      ],
+      "constraintsFiltering": "strict"
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "php"
+      ],
+      "matchFileNames": [
+        "build/php/8.2.json"
+      ],
+      "allowedVersions": "/^8\\.2\\./"
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "php"
+      ],
+      "matchFileNames": [
+        "build/php/8.3.json"
+      ],
+      "allowedVersions": "/^8\\.3\\./"
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "php"
+      ],
+      "matchFileNames": [
+        "build/php/8.4.json"
+      ],
+      "allowedVersions": "/^8\\.4\\./"
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "php"
+      ],
+      "matchFileNames": [
+        "build/php/8.5.json"
+      ],
+      "allowedVersions": "/^8\\.5\\./"
+    },
+    {
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "node"
+      ],
+      "allowedVersions": "/^24\\./"
+    },
+    {
+      "matchDatasources": [
+        "apk"
+      ],
+      "groupName": "Alpine 3.24 packages"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/php\\/8\\.[2-5]\\.json$/"
+      ],
+      "matchStrings": [
+        "\"image\": \"(?<depName>php):(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/php\\/8\\.[2-5]\\.json$/"
+      ],
+      "matchStrings": [
+        "\"package\": \"(?<depName>[^\"]+)\",\\s*\"version\": \"(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "packagist",
+      "versioningTemplate": "composer"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/php\\/8\\.[2-5]\\.json$/"
+      ],
+      "matchStrings": [
+        "\"tag\": \"(?<currentValue>v?[0-9]+\\.[0-9]+\\.[0-9]+)\",\\s*\"commit\": \"(?<currentDigest>[a-f0-9]{40})\""
+      ],
+      "depNameTemplate": "longxinH/xhprof",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/apk\\/3\\.24\\/amd64\\.json$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-zA-Z0-9+_.-]+)\": \"(?<currentValue>[^\"]+-r[0-9]+)\""
+      ],
+      "datasourceTemplate": "apk",
+      "versioningTemplate": "apk",
+      "registryUrlTemplate": "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=x86_64"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/apk\\/3\\.24\\/arm64\\.json$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-zA-Z0-9+_.-]+)\": \"(?<currentValue>[^\"]+-r[0-9]+)\""
+      ],
+      "datasourceTemplate": "apk",
+      "versioningTemplate": "apk",
+      "registryUrlTemplate": "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=aarch64"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github\\/workflows\\/build-test\\.yml$/"
+      ],
+      "matchStrings": [
+        "--package renovate@(?<currentValue>[0-9.]+)"
+      ],
+      "depNameTemplate": "renovate",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github\\/workflows\\/template-images\\.yml$/"
+      ],
+      "matchStrings": [
+        "release: (?<currentValue>v[0-9.]+)"
+      ],
+      "depNameTemplate": "regclient/regclient",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    }
+  ]
+}

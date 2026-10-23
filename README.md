@@ -3,7 +3,7 @@ Adding common PHP extensions to some of the official PHP Docker images.
 
 ## 🐳 Image variants
 
-PHP, extension, Composer, and Node.js updates are checked daily. Affected image variants are rebuilt and published when updates are available. End-of-life PHP versions are not supported or updated.
+Dependency updates are automated. Build-related changes rebuild and publish the affected image variants after both supported architectures pass their tests. End-of-life PHP versions are not supported or updated.
 
 Images support `linux/amd64` and `linux/arm64`. The default `php.ini` is based on `php.ini-production`.
 
