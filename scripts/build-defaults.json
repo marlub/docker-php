@@ -1,0 +1,48 @@
+{
+  "composer": {
+    "version": "2.10.3",
+    "url": "https://getcomposer.org/download/2.10.3/composer.phar",
+    "sha256": "7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6"
+  },
+  "pie": {
+    "version": "1.5.3",
+    "url": "https://github.com/php/pie/releases/download/1.5.3/pie.phar",
+    "sha256": "34a1315073b6089d4cdf4cc5a8295ecc6d36cfde683ef785582f7da0d74f127b"
+  },
+  "xhprof": {
+    "tag": "v2.3.10",
+    "commit": "da774867b337de4a1caeb5dfdd6a3f6793f73391",
+    "url": "https://codeload.github.com/longxinH/xhprof/tar.gz/da774867b337de4a1caeb5dfdd6a3f6793f73391",
+    "sha256": "db19e28bbf594100b992390b6705b3f7794290d9cb9db721346082e54653926e",
+    "version": "2.3.9"
+  },
+  "pie_packages": {
+    "redis": {
+      "package": "phpredis/phpredis",
+      "version": "6.3.0",
+      "configure_options": [
+        "--enable-redis-lzf",
+        "--with-liblzf=yes",
+        "--enable-redis-zstd",
+        "--with-libzstd=yes",
+        "--enable-redis-lz4",
+        "--with-liblz4=yes"
+      ]
+    },
+    "amqp": {
+      "package": "php-amqp/php-amqp",
+      "version": "2.2.0",
+      "configure_options": []
+    },
+    "xdebug": {
+      "package": "xdebug/xdebug",
+      "version": "3.5.3",
+      "configure_options": []
+    },
+    "pcov": {
+      "package": "pecl/pcov",
+      "version": "1.0.12",
+      "configure_options": []
+    }
+  }
+}

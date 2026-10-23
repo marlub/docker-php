@@ -49,17 +49,13 @@ jobs:
           no-cache: true
           target: ${{ matrix.phpimage.node != '' && 'php-node' || 'php' }}
 
+          add-hosts: pecl.php.net:127.0.0.1
           labels: ${{ matrix.phpimage.build_labels }}
           build-args: |
             PHP_BASE_IMAGE=${{ matrix.phpimage.resolved.php_images[matrix.platform] }}
             NODE_BASE_IMAGE=${{ matrix.phpimage.resolved.node_images[matrix.platform] }}
-            INSTALLER_URL=${{ matrix.phpimage.resolved.installer_url }}
-            INSTALLER_SHA256=${{ matrix.phpimage.resolved.installer_sha256 }}
-            COMPOSER_VERSION=${{ matrix.phpimage.resolved.composer_version }}
-            EXTENSIONS_INSTALL=${{ matrix.phpimage.resolved.extensions_install }}
-            PECL_INSTALL=${{ matrix.phpimage.resolved.pecl_install }}
+            ${{ matrix.phpimage.dependency_build_arg }}
             EXTENSIONS=${{ matrix.phpimage.extensions }}
-            PECL=${{ matrix.phpimage.pecl }}
             PACKAGES=${{ matrix.phpimage.packages }}
             OS=${{ matrix.phpimage.os }}
             NODE_VERSION=${{ matrix.phpimage.node }}
@@ -69,7 +65,7 @@ jobs:
       - name: Test build
         env:
           NODE: ${{ matrix.phpimage.node }}
-          EXTENSIONS: ${{ matrix.phpimage.extensions }} ${{ matrix.phpimage.pecl }}
+          EXTENSIONS: ${{ matrix.phpimage.extensions }}
           BUILD_INPUTS: ${{ matrix.phpimage.build_inputs }}
           FINGERPRINT: ${{ matrix.phpimage.fingerprint }}
         run: |
@@ -96,17 +92,13 @@ jobs:
           tags: ${{ inputs.registry }}/${{ inputs.image }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
 
+          add-hosts: pecl.php.net:127.0.0.1
           labels: ${{ matrix.phpimage.build_labels }}
           build-args: |
             PHP_BASE_IMAGE=${{ matrix.phpimage.resolved.php_images[matrix.platform] }}
             NODE_BASE_IMAGE=${{ matrix.phpimage.resolved.node_images[matrix.platform] }}
-            INSTALLER_URL=${{ matrix.phpimage.resolved.installer_url }}
-            INSTALLER_SHA256=${{ matrix.phpimage.resolved.installer_sha256 }}
-            COMPOSER_VERSION=${{ matrix.phpimage.resolved.composer_version }}
-            EXTENSIONS_INSTALL=${{ matrix.phpimage.resolved.extensions_install }}
-            PECL_INSTALL=${{ matrix.phpimage.resolved.pecl_install }}
+            ${{ matrix.phpimage.dependency_build_arg }}
             EXTENSIONS=${{ matrix.phpimage.extensions }}
-            PECL=${{ matrix.phpimage.pecl }}
             PACKAGES=${{ matrix.phpimage.packages }}
             OS=${{ matrix.phpimage.os }}
             NODE_VERSION=${{ matrix.phpimage.node }}

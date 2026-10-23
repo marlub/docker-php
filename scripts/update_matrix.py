@@ -61,7 +61,6 @@ def main():
     ap.add_argument("--variants", nargs="+", default=["fpm"])
     ap.add_argument("--os", nargs="+", default=["alpine"])
     ap.add_argument("--extensions", default="bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof")
-    ap.add_argument("--pecl", default="")
     ap.add_argument("--packages", default="")
     ap.add_argument("--node", nargs="+", default=["", "24"])
     ap.add_argument("--out", default="matrix.json")
@@ -88,7 +87,6 @@ def main():
                             "variant": variant,
                             "os": os,
                             "extensions": args.extensions,
-                            "pecl": args.pecl,
                             "packages": args.packages,
                             "node": node,
                         }

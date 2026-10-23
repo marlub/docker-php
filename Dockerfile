@@ -7,48 +7,13 @@ ARG NODE_BASE_IMAGE="node:${NODE_VERSION:-24}-${OS:-slim}"
 FROM ${PHP_BASE_IMAGE} AS php
 
 ARG EXTENSIONS=""
-ARG PECL=""
 ARG PACKAGES=""
-ARG EXTENSIONS_INSTALL=""
-ARG PECL_INSTALL=""
-ARG COMPOSER_VERSION=""
-ARG INSTALLER_URL="https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions"
-ARG INSTALLER_SHA256=""
+ARG DEPENDENCIES=""
 
 ENV EXTENSIONS="${EXTENSIONS}"
-ENV PECL="${PECL}"
 
-ADD --chmod=0755 ${INSTALLER_URL} /usr/local/bin/install-php-extensions
-
-RUN set -eux; \
-    if [ -n "$INSTALLER_SHA256" ]; then \
-        printf '%s  %s\n' "$INSTALLER_SHA256" /usr/local/bin/install-php-extensions | sha256sum -c -; \
-    fi; \
-    echo "Core extensions:  $EXTENSIONS"; \
-    echo "PECL extensions:  $PECL"; \
-    echo "System packages:  $PACKAGES"; \
-    \
-    #========== System package installation ==========#
-    if [ -n "$PACKAGES" ]; then \
-        if [ -f /etc/alpine-release ]; then \
-            apk add --no-cache $PHPIZE_DEPS $PACKAGES; \
-        else \
-            apt-get update; \
-            apt-get install -y --no-install-recommends $PHPIZE_DEPS $PACKAGES; \
-            rm -rf /var/lib/apt/lists/*; \
-        fi; \
-    fi; \
-    \
-    #========== PHP extensions ==========#
-    if [ -n "$EXTENSIONS" ]; then \
-        install-php-extensions "@composer${COMPOSER_VERSION:+-$COMPOSER_VERSION}" ${EXTENSIONS_INSTALL:-$EXTENSIONS}; \
-    fi; \
-    \
-    #========== PECL extensions ==========#
-    if [ -n "$PECL" ]; then \
-        pecl install --onlyreqdeps --force ${PECL_INSTALL:-$PECL}; \
-        docker-php-ext-enable $PECL; \
-    fi;
+COPY scripts/install_extensions.sh scripts/build_config.php scripts/build-defaults.json /tmp/php-build/
+RUN sh /tmp/php-build/install_extensions.sh
 
 RUN cp /usr/local/etc/php/php.ini-production /usr/local/etc/php/php.ini
 

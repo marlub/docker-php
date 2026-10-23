@@ -31,7 +31,7 @@ def verify(image, build_inputs, fingerprint, run=subprocess.check_output):
         actual = json.loads(run(command, text=True))
         if actual != expected:
             raise ValueError(f"Installed extension versions differ: expected {expected}, got {actual}")
-    composer = inputs["resolved"]["composer_version"]
+    composer = inputs["resolved"]["composer"]["version"]
     if composer:
         output = run(["docker", "run", "--rm", image, "composer", "--version", "--no-ansi"], text=True)
         match = re.search(r"Composer version (\S+)", output)

@@ -20,6 +20,8 @@ bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo
 ```
 All extensions are disabled by default, so new extensions can be added anytime without the risk of breaking setups. You can enable extensions with environment variables prefixed with `PHP_EXTENSION_[NAME]`, for example `PHP_EXTENSION_INTL=true`.
 
+Redis supports LZF, Zstd, and LZ4 compression. GD supports JPEG, PNG, WebP, XPM, FreeType, and AVIF.
+
 ### Customizations
 - With PHP 8.5 opcache is shipped by the official image and no longer managed by this one.
 
@@ -58,3 +60,5 @@ APP_GID=1000
 
 ## 🧩 Node.js
 Most image tags provide further variations with a node version included. Such tags end with `node[version]`.
+
+For local builds and dependency updates, see [Building and maintaining the images](docs/building.md).

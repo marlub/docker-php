@@ -2,6 +2,7 @@
 """Resolve build inputs and select images that differ from their published tags."""
 
 import argparse
+import base64
 import csv
 import hashlib
 import io
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -29,11 +31,21 @@ BUNDLED = frozenset("""
     snmp soap sockets sodium spl sqlite3 standard sysvmsg sysvsem sysvshm tidy
     tokenizer xml xmlreader xmlwriter xsl zip zlib
 """.split())
-# These moved out of PHP's source tree in 8.4 and are now PECL packages.
-MOVED_TO_PECL = frozenset(("imap", "oci8", "pdo_oci", "pspell"))
+MOVED_FROM_CORE = frozenset(("imap", "oci8", "pdo_oci", "pspell"))
+PIE_PACKAGES = {
+    "redis": "phpredis/phpredis", "amqp": "php-amqp/php-amqp",
+    "xdebug": "xdebug/xdebug", "pcov": "pecl/pcov",
+}
+PIE_OPTIONS = {"redis": [
+    "--enable-redis-lzf", "--with-liblzf=yes", "--enable-redis-zstd", "--with-libzstd=yes",
+    "--enable-redis-lz4", "--with-liblz4=yes",
+]}
+PIE_API = "https://api.github.com/repos/php/pie/releases/latest"
+XHPROF_API = "https://api.github.com/repos/longxinH/xhprof"
 SOURCE_FILES = (
     "Dockerfile", "entrypoint.sh", "scripts/test_image.sh",
     "scripts/select_images.py", "scripts/publish_images.py", "scripts/verify_image.py",
+    "scripts/install_extensions.sh", "scripts/build_config.php", "scripts/build-defaults.json",
     ".github/workflows/build-test-publish.yml",
     ".github/workflows/build-test.yml", ".github/workflows/template-images.yml",
 )
@@ -106,7 +118,7 @@ class HTTP:
             root = ET.fromstring(self.get(url))
         except ET.ParseError as exc:
             raise ResolutionError(f"Invalid XML from {url}") from exc
-        # PECL's REST documents use several different default namespaces.
+        # Upstream package.xml files may use a default namespace.
         for element in root.iter():
             element.tag = element.tag.rsplit("}", 1)[-1]
         return root
@@ -179,7 +191,7 @@ def platform_digest(manifest, platform):
 def compatible_php(package, php_version):
     requirements = package.find("dependencies/required/php")
     if requirements is None:
-        raise ResolutionError("PECL package metadata has no PHP requirements")
+        raise ResolutionError("Source package metadata has no PHP requirements")
     actual = version_tuple(php_version)
     minimum = requirements.findtext("min")
     maximum = requirements.findtext("max")
@@ -190,34 +202,155 @@ def compatible_php(package, php_version):
     return all(actual != version_tuple(item.text) for item in requirements.findall("exclude"))
 
 
+class PieRunner:
+    """Resolve with PIE in the Docker daemon's native PHP base, without building."""
+
+    def __init__(self, run=None):
+        self.run = run or subprocess.run
+        self.platform = None
+
+    def command(self, command, **kwargs):
+        try:
+            result = self.run(command, capture_output=True, text=True, timeout=300, **kwargs)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ResolutionError(f"PIE resolution failed: {exc}") from exc
+        if result.returncode:
+            raise ResolutionError(f"PIE resolution failed: {result.stderr.strip()} {result.stdout.strip()}")
+        return result.stdout
+
+    def native_platform(self):
+        if self.platform is None:
+            architecture = self.command(["docker", "info", "--format", "{{.Architecture}}"]).strip()
+            architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(architecture, architecture)
+            self.platform = "linux/" + architecture
+            if self.platform not in PLATFORMS:
+                raise ResolutionError(f"Unsupported Docker architecture: {architecture}")
+        return self.platform
+
+    def info(self, images, pie_bytes, package):
+        platform = self.native_platform()
+        # Stream the verified PHAR over stdin instead of relying on host bind mounts
+        # (the daemon may be Docker Desktop or remote).
+        script = (
+            "file_put_contents('/tmp/pie.phar', base64_decode(stream_get_contents(STDIN))); "
+            "require '/tmp/pie.phar';"
+        )
+        return self.command([
+            "docker", "run", "--rm", "-i", "--platform", platform,
+            "--add-host", "pecl.php.net:127.0.0.1", "--entrypoint", "php", images[platform],
+            "-r", script, "--", "--no-interaction", "--no-ansi", "info", package + ":*@stable",
+        ], input=base64.b64encode(pie_bytes).decode())
+
+
+def parse_pie_info(output, name, package):
+    values = {}
+    for label in ("Extension name", "Composer package name", "Version"):
+        matches = re.findall(r"^" + re.escape(label) + r": ([^\r\n]+)$", output, re.M)
+        if len(matches) != 1:
+            raise ResolutionError(f"Missing or ambiguous PIE {label} for {package}")
+        values[label] = matches[0].strip()
+    version = values["Version"].removeprefix("v")
+    if (values["Extension name"] != name or values["Composer package name"] != package
+            or not re.fullmatch(r"\d+(?:\.\d+){1,3}", version)):
+        raise ResolutionError(f"Unexpected PIE package, extension, or non-stable version for {name}")
+    return version
+
+
 class Resolver:
-    def __init__(self, http, registry, source_root):
+    def __init__(self, http, registry, source_root, pie_runner=None):
         self.http = http
         self.registry = registry
+        self.pie_runner = pie_runner or PieRunner()
         self.sources = {name: sha256((source_root / name).read_bytes()) for name in SOURCE_FILES}
         self.releases = {}
 
-    def extension(self, name, php_version):
-        key = (name, php_version)
+    def pie(self):
+        release = self.http.json(PIE_API)
+        version = release["tag_name"].removeprefix("v")
+        if release.get("prerelease") or release.get("draft") or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise ResolutionError("PIE release must be stable")
+        assets = [asset for asset in release["assets"] if asset["name"] == "pie.phar"]
+        if len(assets) != 1:
+            raise ResolutionError("PIE release must contain exactly one pie.phar asset")
+        url = assets[0]["browser_download_url"]
+        if url != f"https://github.com/php/pie/releases/download/{release['tag_name']}/pie.phar":
+            raise ResolutionError("PIE asset URL is not a versioned upstream PHAR")
+        content = self.http.get(url)
+        checksum = sha256(content)
+        if assets[0].get("digest") and assets[0]["digest"] != "sha256:" + checksum:
+            raise ResolutionError("PIE release asset checksum mismatch")
+        return {"version": version, "url": url, "sha256": checksum}, content
+
+    def extension(self, name, php_images, pie, pie_bytes):
+        key = (name, canonical(php_images), pie["sha256"])
+        if key not in self.releases:
+            package = PIE_PACKAGES[name]
+            output = self.pie_runner.info(php_images, pie_bytes, package)
+            version = parse_pie_info(output, name, package)
+            self.releases[key] = {
+                "package": package, "version": version,
+                "configure_options": PIE_OPTIONS.get(name, []),
+            }
+        return self.releases[key]
+
+    def xhprof(self, php_version):
+        key = ("xhprof", php_version)
         if key in self.releases:
             return self.releases[key]
-        base = f"https://pecl.php.net/rest/r/{name}/"
-        releases = self.http.xml(base + "allreleases.xml")
-        stable = [item for item in releases.findall("r") if item.findtext("s") == "stable"
-                  and re.fullmatch(r"\d+(?:\.\d+){0,3}", item.findtext("v", ""))]
-        stable.sort(key=lambda item: version_tuple(item.findtext("v", "")), reverse=True)
-        for release in stable:
-            version = release.findtext("v")
-            minimum = release.findtext("m")
-            if minimum and version_tuple(php_version) < version_tuple(minimum):
+        tags = []
+        page = 1
+        while True:
+            batch = self.http.json(f"{XHPROF_API}/tags?per_page=100&page={page}")
+            tags.extend(item for item in batch if re.fullmatch(r"v?\d+\.\d+\.\d+", item["name"]))
+            if len(batch) < 100:
+                break
+            page += 1
+        tags.sort(key=lambda item: version_tuple(item["name"].removeprefix("v")), reverse=True)
+        for tag in tags:
+            commit = tag["commit"]["sha"]
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise ResolutionError("Invalid XHProf source commit")
+            base = f"https://raw.githubusercontent.com/longxinH/xhprof/{commit}/"
+            if not compatible_php(self.http.xml(base + "package.xml"), php_version):
                 continue
-            package = self.http.xml(base + f"package.{version}.xml")
-            if compatible_php(package, php_version):
-                self.releases[key] = version
-                return version
-        raise ResolutionError(f"No stable {name} release supports PHP {php_version}")
+            header = self.http.get(base + "extension/php_xhprof.h").decode()
+            versions = re.findall(r'^#define\s+XHPROF_VERSION\s+"(\d+\.\d+\.\d+)"', header, re.M)
+            if len(versions) != 1:
+                raise ResolutionError("Missing or ambiguous XHProf module version")
+            url = f"https://codeload.github.com/longxinH/xhprof/tar.gz/{commit}"
+            archive = self.http.get(url)
+            # Validate that the metadata used above belongs to the exact build archive.
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as source:
+                root = "xhprof-" + commit + "/"
+                for path in ("package.xml", "extension/php_xhprof.h"):
+                    file = source.extractfile(root + path)
+                    if file is None or file.read() != self.http.get(base + path):
+                        raise ResolutionError("XHProf archive metadata mismatch")
+            result = {"tag": tag["name"], "commit": commit, "url": url,
+                      "sha256": sha256(archive), "version": versions[0]}
+            self.releases[key] = result
+            return result
+        raise ResolutionError(f"No stable XHProf source supports PHP {php_version}")
+
+    def composer(self, entry):
+        if not entry["extensions"].strip():
+            return {"version": "", "url": "", "sha256": ""}
+        releases = self.http.json("https://getcomposer.org/versions")["stable"]
+        numeric_php = entry["major"] * 10000 + entry["minor"] * 100 + entry["patch"]
+        compatible = [item for item in releases if item["min-php"] <= numeric_php
+                      and re.fullmatch(r"\d+\.\d+\.\d+", item["version"])]
+        if not compatible:
+            raise ResolutionError("No stable Composer release supports this PHP version")
+        version = max(compatible, key=lambda item: version_tuple(item["version"]))["version"]
+        url = f"https://getcomposer.org/download/{version}/composer.phar"
+        checksum = sha256(self.http.get(url))
+        if self.http.get(url + ".sha256sum").decode().split()[0] != checksum:
+            raise ResolutionError("Composer PHAR checksum mismatch")
+        return {"version": version, "url": url, "sha256": checksum}
 
     def resolve(self, entry):
+        if "pecl" in entry:
+            raise ResolutionError("The pecl matrix field was removed; use extensions")
         minor_tag, patch_tag = tags(entry)
         php_version = f'{entry["major"]}.{entry["minor"]}.{entry["patch"]}'
         base_tag = "-".join(filter(None, (php_version, entry["variant"], entry["os"])))
@@ -225,57 +358,52 @@ class Resolver:
         node_images = {}
         if entry["node"]:
             node_images = self.registry.bases(f'node:{entry["node"]}-{entry["os"] or "slim"}')
-
-        installer = self.http.json("https://api.github.com/repos/mlocati/docker-php-extension-installer/releases/latest")
-        assets = [asset for asset in installer["assets"] if asset["name"] == "install-php-extensions"]
-        if len(assets) != 1:
-            raise ResolutionError("Extension installer release must contain exactly one installer asset")
-        installer_url = assets[0]["browser_download_url"]
-        installer_sha256 = sha256(self.http.get(installer_url))
-        extensions = {}
-        lists = {}
-        for field in ("extensions", "pecl"):
-            installs = []
-            for name in entry[field].split():
-                if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
-                    raise ResolutionError(f"Use plain extension names in matrix.json, got {name!r}")
-                bundled = name in BUNDLED and not (
-                    name in MOVED_TO_PECL and version_tuple(php_version) >= version_tuple("8.4")
-                )
-                if field == "extensions" and bundled:
-                    installs.append(name)
-                else:
-                    version = self.extension(name, php_version)
-                    extensions[name] = version
-                    installs.append(f"{name}-{version}")
-            lists[field] = " ".join(installs)
-
-        composer = ""
-        if entry["extensions"].strip():
-            releases = self.http.json("https://getcomposer.org/versions")["stable"]
-            numeric_php = entry["major"] * 10000 + entry["minor"] * 100 + entry["patch"]
-            compatible = [item for item in releases if item["min-php"] <= numeric_php]
-            if not compatible:
-                raise ResolutionError(f"No stable Composer release supports PHP {php_version}")
-            composer = max(compatible, key=lambda item: version_tuple(item["version"]))["version"]
-
+        names = entry["extensions"].split()
+        core, packages, versions, xhprof = [], {}, {}, {}
+        for name in names:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                raise ResolutionError(f"Use plain extension names in matrix.json, got {name!r}")
+            bundled = name in BUNDLED and not (
+                name in MOVED_FROM_CORE and version_tuple(php_version) >= version_tuple("8.4")
+            )
+            if name not in PIE_PACKAGES and name != "xhprof" and not bundled:
+                raise ResolutionError(f"No PIE package or source builder configured for {name}")
+            if name == "opcache" and version_tuple(php_version) >= version_tuple("8.5"):
+                raise ResolutionError("PHP 8.5+ opcache is built in; remove it from extensions")
+            if bundled:
+                core.append(name)
+        pie, pie_bytes = self.pie() if any(name in PIE_PACKAGES for name in names) else ({}, b"")
+        for name in names:
+            if name in PIE_PACKAGES:
+                packages[name] = self.extension(name, php_images, pie, pie_bytes)
+                versions[name] = packages[name]["version"]
+            elif name == "xhprof":
+                xhprof = self.xhprof(php_version)
+                versions[name] = xhprof["version"]
+        composer = self.composer(entry)
         resolved = {
             "php_images": php_images, "node_images": node_images,
-            "installer_url": installer_url, "installer_sha256": installer_sha256,
-            "composer_version": composer,
-            "extensions_install": lists["extensions"], "pecl_install": lists["pecl"],
+            "composer": composer, "pie": pie, "pie_packages": packages,
+            "extensions_install": " ".join(core), "xhprof": xhprof,
         }
-        inputs = {"schema": 1, "variant": entry, "resolved": resolved,
-                  "extension_versions": extensions, "sources": self.sources}
+        inputs = {"schema": 2, "variant": entry, "resolved": resolved,
+                  "extension_versions": versions, "sources": self.sources}
         build_inputs = canonical(inputs)
         fingerprint = sha256(build_inputs.encode())
-        # build-push-action parses list inputs as CSV, including embedded JSON quotes.
         label_output = io.StringIO()
         writer = csv.writer(label_output, lineterminator="\n")
         writer.writerow([FINGERPRINT_LABEL + "=" + fingerprint])
         writer.writerow([INPUTS_LABEL + "=" + build_inputs])
+        dependencies = canonical({
+            key: value for key, value in resolved.items() if key not in ("php_images", "node_images")
+        })
+        # The action parses build arguments as CSV too. Quote the whole argument
+        # so quotes around individual configure options in JSON arrays survive.
+        argument_output = io.StringIO()
+        csv.writer(argument_output, lineterminator="\n").writerow(["DEPENDENCIES=" + dependencies])
         return {**entry, "tagMinor": minor_tag, "tagPatch": patch_tag,
-                "resolved": resolved, "fingerprint": fingerprint,
+                "resolved": resolved, "dependencies": dependencies,
+                "dependency_build_arg": argument_output.getvalue().rstrip("\n"), "fingerprint": fingerprint,
                 "build_inputs": build_inputs, "build_labels": label_output.getvalue()}
 
 
@@ -351,7 +479,7 @@ def main():
         if args.summary:
             with open(args.summary, "a") as output:
                 output.write("### Dependency check\n\n" + summary)
-    except (ResolutionError, KeyError, TypeError, ValueError, OSError) as exc:
+    except (ResolutionError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
         print(f"Dependency check failed: {exc}", file=sys.stderr)
         return 1
     return 0

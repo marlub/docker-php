@@ -6,7 +6,7 @@ if [ ! -f /tmp/.extensions-disabled ]; then
 
     INI_FILES=$(php --ini | awk '/\.ini/ {print $NF}' | tr -d ',' | sort -u)
 
-    for ext in $EXTENSIONS $PECL; do
+    for ext in $EXTENSIONS; do
         VAR="PHP_EXTENSION_$(echo "$ext" | tr '[:lower:]' '[:upper:]')"
         VALUE=$(eval echo "\$$VAR")
 
