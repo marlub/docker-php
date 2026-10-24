@@ -16,7 +16,7 @@ Images support `linux/amd64` and `linux/arm64`. The default `php.ini` is based o
 
 ## 🧬 Extensions added on top of the official PHP images
 ```
-bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof
+bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof opentelemetry grpc protobuf
 ```
 All extensions are disabled by default, so new extensions can be added anytime without the risk of breaking setups. You can enable extensions with environment variables prefixed with `PHP_EXTENSION_[NAME]`, for example `PHP_EXTENSION_INTL=true`.
 
@@ -42,6 +42,9 @@ PHP_EXTENSION_PDO_PGSQL="true"
 PHP_EXTENSION_PDO_MYSQL="true"
 PHP_EXTENSION_REDIS="true"
 PHP_EXTENSION_AMQP="true"
+PHP_EXTENSION_OPENTELEMETRY="true"
+PHP_EXTENSION_GRPC="true"
+PHP_EXTENSION_PROTOBUF="true"
 PHP_EXTENSION_XDEBUG="false"
 PHP_EXTENSION_PCOV="false"
 PHP_EXTENSION_XHPROF="false"

@@ -86,6 +86,26 @@ class SelectionTests(RepositoryTests):
         self.assertEqual(result['phpimages'], [])
         self.assertTrue(all(row['state'] == 'Not selected' for row in result['report']))
 
+    def test_telemetry_extensions_and_distinct_module_version(self):
+        for entry in self.entries():
+            with self.subTest(variant=entry['tagMinor']):
+                packages = json.loads((self.root / f"build/php/{entry['minor']}.json").read_text())['pie_packages']
+                self.assertTrue({'opentelemetry', 'grpc', 'protobuf'} <= set(entry['extensions'].split()))
+                for name in ('opentelemetry', 'grpc'):
+                    self.assertEqual(entry['extension_versions'][name], packages[name]['version'])
+                self.assertEqual(entry['extension_versions']['protobuf'], packages['protobuf']['module_version'])
+                self.assertNotEqual(entry['extension_versions']['protobuf'], packages['protobuf']['version'])
+        package_version = json.loads((self.root / 'build/php/8.2.json').read_text())['pie_packages']['protobuf']['version']
+        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['protobuf'].pop('module_version'))
+        self.assertEqual(self.entries()[0]['extension_versions']['protobuf'], package_version)
+
+    def test_invalid_module_version_fails(self):
+        for value in ('latest', '5.36.2;command', '', None, 5):
+            with self.subTest(value=value):
+                self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['protobuf'].update(module_version=value))
+                with self.assertRaises(ResolutionError):
+                    self.entries()
+
     def test_php_specific_updates(self):
         for minor in ('8.2', '8.3', '8.4', '8.5'):
             with self.subTest(minor=minor):
@@ -488,6 +508,15 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(self.source['tag'], 'v2.3.10')
         verify('test', self.entry, self.run_image)
 
+    def test_protobuf_package_version_is_not_its_module_version(self):
+        package = json.loads((ROOT / f"build/php/{self.entry['minor']}.json").read_text())['pie_packages']['protobuf']
+        self.assertEqual(self.versions['protobuf'], package['module_version'])
+        self.assertNotEqual(self.versions['protobuf'], package['version'])
+        verify('test', self.entry, self.run_image)
+        self.versions['protobuf'] = package['version']
+        with self.assertRaises(ValueError):
+            verify('test', self.entry, self.run_image)
+
     def test_wrong_source_or_variant_label_fails(self):
         for label in (REVISION_LABEL, VARIANT_LABEL):
             old = self.labels[label]
@@ -532,7 +561,7 @@ class RenovateTests(unittest.TestCase):
                         expression=re.sub(r'\(\?<([a-zA-Z]+)>',r'(?P<\1>',expression)
                         matches+=list(re.finditer(expression,path.read_text()))
             counts.append(len(matches))
-        self.assertEqual(counts[:3],[4,16,4])
+        self.assertEqual(counts[:3],[4,28,4])
         self.assertEqual(counts[3:5], [len(json.loads((ROOT/f'build/apk/3.24/{arch}.json').read_text())['packages']) for arch in ('amd64','arm64')])
 
     def test_revision_aware_architecture_specific_lookup(self):

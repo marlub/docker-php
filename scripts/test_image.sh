@@ -90,6 +90,45 @@ case " $EXTENSIONS " in
         ;;
 esac
 case " $EXTENSIONS " in
+    *' opentelemetry '*)
+        echo '> OpenTelemetry executes instrumentation hooks'
+        run_container -e PHP_EXTENSION_OPENTELEMETRY=true "$IMAGE" php -r '
+            $calls = 0;
+            OpenTelemetry\Instrumentation\hook(null, "telemetry_probe", pre: static function () use (&$calls) {
+                $calls++;
+            });
+            function telemetry_probe(int $value): int { return $value + 1; }
+            if (telemetry_probe(41) !== 42 || $calls !== 1) { exit(1); }
+        '
+        ;;
+esac
+case " $EXTENSIONS " in
+    *' grpc '*)
+        echo '> gRPC can create and close a channel without a server'
+        run_container -e PHP_EXTENSION_GRPC=true "$IMAGE" php -r '
+            $channel = new Grpc\Channel("localhost:4317", [
+                "credentials" => Grpc\ChannelCredentials::createInsecure(),
+            ]);
+            if ($channel->getTarget() === "") { exit(1); }
+            $channel->close();
+        '
+        ;;
+esac
+case " $EXTENSIONS " in
+    *' protobuf '*)
+        echo '> Protobuf messages round trip without Composer dependencies'
+        run_container -e PHP_EXTENSION_PROTOBUF=true "$IMAGE" php -r '
+            $message = new Google\Protobuf\Timestamp();
+            $message->setSeconds(1234567890)->setNanos(123456789);
+            $encoded = $message->serializeToString();
+            $decoded = new Google\Protobuf\Timestamp();
+            $decoded->mergeFromString($encoded);
+            if ($encoded === "" || $decoded->getSeconds() !== 1234567890 ||
+                $decoded->getNanos() !== 123456789) { exit(1); }
+        '
+        ;;
+esac
+case " $EXTENSIONS " in
     *' xhprof '*)
         echo '> XHProf can collect a profile and retains its PHP support files'
         run_container -e PHP_EXTENSION_XHPROF=true "$IMAGE" php -r '
