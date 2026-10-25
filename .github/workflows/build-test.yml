@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: '24'
       - name: Validate Renovate configuration
-        run: npx --yes --package renovate@44.181.0 renovate-config-validator --strict
+        run: npx --yes --package renovate@44.181.5 renovate-config-validator --strict
       - name: Record build source
         id: source
         run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
