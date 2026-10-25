@@ -1,5 +1,5 @@
 {
-  "image": "php:8.4.27-fpm-alpine3.24@sha256:6b83fd767e1902ae4c89fe11f929f02e78bf769215c703060ac8a7c4be672c8c",
+  "image": "php:8.4.27-fpm-alpine3.24@sha256:93aa3f61216b73cc6f878235c9772849449f4efc18dfe3d6678eed645076c00d",
   "extensions": "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof opentelemetry grpc protobuf",
   "packages": "",
   "pie_packages": {

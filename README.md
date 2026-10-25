@@ -1,5 +1,11 @@
-# docker-php
-Adding common PHP extensions to some of the official PHP Docker images.
+# PHP-FPM Docker images with optional Node.js
+Docker images based on the official PHP-FPM Alpine images, with
+preinstalled extensions you can enable through environment variables.
+
+Includes database drivers, Redis, AMQP, image processing with GD,
+and development tools such as Xdebug, PCOV, and XHProf. Optional
+Node.js variants let you run PHP and JavaScript tooling in the
+same container.
 
 ## 🐳 Image variants
 

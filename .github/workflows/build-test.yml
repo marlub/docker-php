@@ -15,19 +15,19 @@ jobs:
       has_changes: ${{ steps.select.outputs.has_changes }}
       source_ref: ${{ steps.source.outputs.ref }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.11'
       - name: Validate configuration and publication logic
         run: python -m unittest discover -s tests -v
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24'
       - name: Validate Renovate configuration
-        run: npx --yes --package renovate@44.181.0 renovate-config-validator --strict
+        run: npx --yes --package renovate@44.181.5 renovate-config-validator --strict
       - name: Record build source
         id: source
         run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
