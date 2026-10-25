@@ -1,74 +1,122 @@
 # Building and maintaining the images
 
-## Updates and publication
+This guide covers local builds, dependency updates, and publication. For available images and runtime configuration, see the [README](../README.md).
 
-The hosted Renovate app proposes updates to committed image digests, extension versions, XHProf source commits, GitHub Actions, and Alpine packages. Stable patch, minor, package revision, and digest updates can merge after the required tests pass. Major updates require review. PHP minors and Node major 24 stay fixed until explicitly changed.
+## Build and test locally
 
-Build-related pushes to `main` select variants from the Git diff covering the entire push. Changes to a PHP-minor manifest select its plain and Node variants; runtime package locks select variants using that Alpine release. Node-only Dockerfile changes select Node variants. Shared image sources, scripts, tests, and CI workflows select all variants. Documentation, Renovate configuration, and unrelated changes select nothing. PRs use the same rules against the target-base commit and test the checked-out merge result without publishing.
+Run commands from the repository root. Local builds require Docker with Buildx, access to the Docker daemon, `jq`, and network access. The Python checks and image selection tools also require Python 3 and Git history. Only Alpine PHP base images are supported.
 
-Each selected variant calls the reusable workflow independently. Its publication job depends on both architecture builds succeeding; a failed variant does not block other complete variants. Selected variants build and test on both architectures before updating minor and patch tags. Each architecture image is compiled once, tested locally on its CI runner, and transferred to the registry by digest. Candidate source/variant labels and the final tags' architecture digests are verified. A variant changed by a newer commit on `main` is reported as `Superseded`; its older candidate does not update tags. Publication runs queue without replacing pending runs.
-
-Renovate discovers upstream updates on its hosted schedule; there is no scheduled publication check or automatic tag repair. Formatting-only changes to selected build files can rebuild images. Publication does not compare inputs with existing images.
-
-## Configuration
-
-`build/php/<minor>.json` holds each PHP base reference, extension list, PIE package versions and configure options, and the XHProf tag/commit pair. PHP bases include an explicit Alpine release and an immutable multi-platform digest. PIE, Composer, and Node image pins live in the Dockerfile.
-
-`build/apk/<release>/<architecture>.json` holds the exact additional runtime package versions, including their transitive dependencies and `-rN` revisions. Inherited, unchanged packages are covered by the PHP base digest. Renovate looks up amd64 packages in `x86_64` repositories and arm64 packages in `aarch64` repositories. Related runtime package updates are grouped across architectures. Temporary build tools and development packages are resolved from the configured Alpine branch and removed after compilation; their versions are not tracked.
-
-The installer enforces runtime pins during package installation and checks the final package inventory after build-dependency cleanup. It rejects missing pins, unrecorded runtime dependencies, and version drift. Incompatible or unavailable runtime pins fail the build. Build-tool updates alone do not trigger rebuilds, so rebuilding unchanged committed inputs can use newer temporary build tools. Normal builds do not query upstream extension releases or regenerate package locks.
-
-External modules use PIE: Redis (`phpredis/phpredis`), AMQP (`php-amqp/php-amqp`), Xdebug (`xdebug/xdebug`), and PCOV (`pecl/pcov`). The PCOV package identifier does not require the PECL service. Bundled modules use Docker's PHP helpers. XHProf is compiled from the pinned Git checkout; its source tag and actual module version are recorded separately in `/usr/local/lib/php/xhprof-build.json`. Tag `v2.3.10` reports module version `2.3.9`.
-
-The Dockerfile invokes `scripts/install_extensions.sh` with POSIX shell. It reads JSON using temporary `jq` tooling and executes commands directly, without generated shell code or `eval`. The base inventory is captured before installing `jq`; both JSON tooling and extension build dependencies are removed before checking the final runtime inventory. APK inventory validation remains in PHP, and package profiles remain shared with the lock-refresh command.
-
-PIE is mounted only during the build. Composer is copied from its upstream binary image. Temporary sources, build dependencies, and legacy PECL clients are removed.
-
-## Local checks and builds
-
-Run unit tests and prepare the complete matrix without building or contacting registries:
+Run the unit tests:
 
 ```sh
 python3 -m unittest discover -s tests -v
-python3 scripts/select_images.py --out /tmp/php-build-matrix.json
 ```
 
-Select changes against a Git reference, or select one PHP minor explicitly:
+Build a PHP 8.4 image using its committed base image and extension pins:
 
 ```sh
-python3 scripts/select_images.py --base-ref origin/main --out /tmp/php-build-matrix.json
-python3 scripts/select_images.py --php 8.4 --out /tmp/php-build-matrix.json
+php_manifest=build/php/8.4.json
+extensions=$(jq -r '.extensions' "$php_manifest")
+
+docker buildx build --load --target php --tag docker-php:local \
+  --build-arg PHP_BASE_IMAGE="$(jq -r '.image' "$php_manifest")" \
+  --build-arg EXTENSIONS="$extensions" \
+  --build-arg PACKAGES="$(jq -r '.packages' "$php_manifest")" \
+  .
 ```
 
-Selection requires Git history but does not need Docker or registry access. An unavailable Git reference fails selection; a zero `before` SHA on an initial push selects all variants. Omitting selection options or passing `--php All` selects all variants.
+Choose another manifest to build a different PHP minor. To include Node.js, use `--target php-node`; its base image is pinned in the Dockerfile. Custom bases can be supplied through `PHP_BASE_IMAGE` and `NODE_BASE_IMAGE`, and must match the supported PHP, Node, and Alpine versions. Changing `NODE_VERSION` alone does not select a different Node image.
 
-During publication, `select_images.py --check-current <variant-json> --github-output <file>` fetches current `main` and emits `superseded=true|false`. This mode needs Git/network access and fails on fetch errors. `verify_image.py --metadata --entry <variant-json> --platform linux/amd64` reads registry image metadata from stdin and verifies architecture, revision, and variant identity; normal `--image` mode still checks the locally built image and installed versions.
+Test the resulting image:
 
-Only Alpine PHP base images are supported. Standalone Docker/Compose builds use the extension and package pins matching the actual PHP minor and Alpine release. `EXTENSIONS` remains the module list; `PACKAGES` on Alpine must be covered by the package lock. The `DEPENDENCIES` build argument and separate defaults file have been removed. Override `PHP_BASE_IMAGE` or `NODE_BASE_IMAGE` for custom bases. The default Node image is pinned; changing `NODE_VERSION` alone does not replace that image.
+```sh
+docker run --rm --entrypoint php -v "$PWD:/work:ro" \
+  docker-php:local /work/tests/test_apk_lock.php
+docker run --rm --entrypoint sh -v "$PWD:/work:ro" \
+  docker-php:local /work/tests/test_installer.sh
+scripts/test_image.sh --image=docker-php:local --extensions="$extensions"
+```
 
-## Refreshing package locks
+For a Node variant, also pass `--node=24` to `scripts/test_image.sh`. The image checks cover disabled extension defaults, independent activation, combined loading, extension functionality, and container user settings. CI also verifies installed versions against the committed pins.
 
-Refreshing locks requires Docker, network access, and execution of disposable PHP base containers. It installs only the runtime package profile and records its additional dependency closure; it does not install compilers, compile extensions, or build the image variants. Cross-architecture resolution requires a matching native runner or emulation.
+Builds use the host architecture by default. Add `--platform linux/amd64` or `--platform linux/arm64` to select one explicitly; building or running another architecture requires emulation. CI tests both architectures on native runners.
+
+### Preview the build matrix
+
+Generate the complete matrix, select a PHP minor, or select committed changes against a Git reference:
+
+```sh
+python3 scripts/select_images.py --out /tmp/php-build-matrix.json
+python3 scripts/select_images.py --php 8.4 --out /tmp/php-build-matrix.json
+python3 scripts/select_images.py --base-ref origin/main --out /tmp/php-build-matrix.json
+```
+
+Each command replaces the output file. Selection needs Git history but does not require Docker or network access. Fetch the comparison reference beforehand if it is unavailable locally. Without a selection option, all variants are included.
+
+## Update dependencies and extensions
+
+The build inputs live in these files:
+
+| File | Contents |
+| --- | --- |
+| `build/php/<minor>.json` | PHP base image, extension list, PIE package pins and configure options, and XHProf source tag and commit |
+| `build/apk/<release>/<architecture>.json` | Additional runtime packages and their exact versions, including transitive dependencies |
+| `Dockerfile` | PIE, Composer, and Node base image pins |
+| `scripts/alpine_packages.sh` | Build and runtime package profiles used during installation and lock refreshes |
+
+PHP bases specify an Alpine release and an immutable image digest. Unchanged packages inherited from the base are covered by that digest. Additional runtime packages are checked against the architecture's lockfile after build dependencies are removed. Missing pins, unavailable versions, and unexpected runtime dependencies fail the build.
+
+Temporary build tools and development packages use the configured Alpine repositories and are removed after compilation. Their versions are not pinned, so rebuilding the same committed inputs can use newer build tools. Normal builds use the committed extension and runtime package pins without refreshing them.
+
+### Add or update an extension
+
+1. Update the extension list and package or source pin in each affected PHP manifest. Bundled extensions use Docker's PHP helpers; external extensions use PIE. XHProf is built from its pinned Git commit.
+2. For PIE packages, set `version` to the exact package release. If the PHP module reports a different version, also set `module_version`; otherwise verification defaults to `version`. Review both values when updating Protobuf, which uses the third-party `extport/protobuf` mirror.
+3. Add any system dependencies to the package profiles and refresh both architecture locks when runtime dependencies change.
+4. Update the README and Compose examples for new extensions, and add a functional check to `scripts/test_image.sh`.
+5. Run the local checks and require successful CI builds on both architectures before publication.
+
+All extensions added by this project remain disabled by default. The entrypoint enables them with `PHP_EXTENSION_<NAME>=true` or `1`. Keep the PHP 8.5 built-in OPcache exception when updating extension lists.
+
+### Refresh runtime package locks
+
+Refresh the locks after adding runtime dependencies or changing the Alpine release:
 
 ```sh
 python3 scripts/refresh_apk_locks.py --platform linux/amd64
 python3 scripts/refresh_apk_locks.py --platform linux/arm64
 ```
 
-Review and commit the resulting lock changes. New runtime dependencies and Alpine release migrations require this explicit refresh. When using an already cached platform-specific base, select its PHP minor with `--php` and supply its reference with `--base-image`.
+The refresh runs disposable PHP base containers and resolves the runtime package profile, including its dependencies. It requires Docker, network access, and a native runner or emulation for the selected architecture. It does not compile extensions or build the final images.
 
-Alpine repositories may remove historical package versions. Unavailable pins fail explicitly; exact pins do not provide an archival package mirror.
+Review and commit both lockfiles, then rebuild and test the affected images. Extra packages requested through the `PACKAGES` build argument must also be covered by the runtime lock.
 
-## Repository setup
+Alpine repositories can remove historical package versions. If a pin becomes unavailable, refresh and review the locks before rebuilding.
 
-Install the [hosted Renovate app](https://github.com/apps/renovate) for this repository. Protect `main` with the required **Validate build outcome** check, require branches to be up to date, and allow the bot to merge passing PRs under the repository's review rules. Renovate merges PRs itself (`platformAutomerge: false`); no publication-workflow GitHub App secret is needed.
+## Automated updates and publication
 
-## Manual recovery
+The hosted Renovate app proposes updates to base images, extension versions, XHProf source pins, PIE and Composer images, GitHub Actions, and Alpine runtime packages. Stable patch, minor, package revision, and digest updates can merge after required checks pass; major updates require review. PHP minor versions and Node major 24 stay fixed until explicitly changed.
 
-Run **Build & publish PHP images with extensions** from `main` and choose `All` or a PHP minor. A chosen minor rebuilds both its plain and Node variants on both architectures. Dispatches from other branches are rejected. Manual dispatch reads current `main` when selection starts.
+Pull requests test the affected variants without publishing. Build-related pushes to `main` select variants from all changes in the push:
 
-Rerunning an existing push run repeats its original Git selection and may rebuild or republish variants that previously succeeded. Architecture digests are stored in separate, exactly named artifacts per variant. Reruns overwrite the matching artifact; failed-job retries can reuse the successful architecture’s artifact from the same run. If artifacts have expired, rerun all jobs or dispatch a fresh build. Failed variants are not automatically added to later unrelated runs. Use a fresh manual dispatch to recover failed variants or recreate missing tags. Complete variants can publish even if another variant fails; variants with failed or incomplete architecture tests retain their existing tags. A registry error during tag updates can leave a partial publication; recover it with a fresh manual dispatch. Candidates superseded by relevant newer changes leave publication to the newer run. Inspect publication summaries for `Published`, `Not selected`, `Superseded`, and `Failed`.
+| Changed input | Variants selected |
+| --- | --- |
+| PHP minor manifest | That minor's PHP and Node variants |
+| Runtime package lock | All variants using that Alpine release |
+| Node-only Dockerfile configuration | Node variants |
+| Shared build sources, scripts, tests, or CI workflows | All variants |
+| Documentation, Renovate configuration, or unrelated files | None |
 
-No image migration or new repository secrets are required. The first push containing this workflow change selects all variants. Existing image tags remain compatible; image identity now uses the source revision and variant labels.
+Each variant publishes its minor and patch tags only after its amd64 and arm64 builds and tests pass. CI publishes the tested images and verifies their source identity and architecture digests. Successful variants can publish independently of failures in other variants. A candidate overtaken by relevant changes on `main` is marked `Superseded` and leaves publication to the newer build.
 
-Tests run on native amd64 and arm64 GitHub runners. The aggregate PR check must pass even when selection is intentionally empty; failed selection or unexpectedly skipped builds cannot pass it.
+### Rebuild or recover images
+
+In GitHub Actions, run **Build & publish PHP images with extensions** from `main`. Choose `All` or a PHP minor; selecting a minor rebuilds its PHP and Node variants on both architectures using current `main`.
+
+Use a fresh manual run to recover failed variants, restore missing tags, or recover from partially updated tags. Failed variants are not automatically retried by unrelated pushes, and there is no scheduled tag repair. Check the workflow summaries for `Published`, `Not selected`, `Superseded`, and `Failed`.
+
+Rerunning an existing push workflow repeats its original selection.
+
+### Set up a repository or fork
+
+Install the [hosted Renovate app](https://github.com/apps/renovate). Protect `main` with the required **Validate build outcome** check, require branches to be up to date, and allow Renovate to merge passing updates under the repository's review rules. Renovate performs the merges itself.

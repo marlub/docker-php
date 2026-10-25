@@ -33,6 +33,17 @@ jq -e '
     .xhprof == true
 ' "$plan" > /dev/null
 
+# Telemetry modules use PIE on every supported PHP minor.
+for minor in 8.2 8.3 8.4 8.5; do
+    extension_plan "$root/build/php/$minor.json" "${minor%.*}0${minor#*.}00" \
+        'opentelemetry grpc protobuf' > "$plan"
+    jq -e '
+        .core == [] and
+        .external == ["opentelemetry", "grpc", "protobuf"] and
+        .xhprof == false
+    ' "$plan" > /dev/null
+done
+
 # An empty selection must produce no installation targets.
 extension_plan "$config" 80400 '' > "$plan"
 jq -e '
@@ -52,6 +63,9 @@ expect_failure extension_plan "$config" 80400 'redis;echo unsafe'
 for change in \
     '.package = "not-a-package"' \
     '.version = "latest"' \
+    '.module_version = "latest"' \
+    '.module_version = null' \
+    '.module_version = 5' \
     '.configure_options = ["--invalid;command"]'
 do
     jq ".pie_packages.redis |= ($change)" "$config" > "$temporary/invalid.json"
@@ -116,6 +130,16 @@ jq -e --slurpfile manifest "$config" '
         [.package + ":" + .version] + .configure_options
     )
 ' "$ARGUMENT_LOG" > /dev/null
+
+# Install the Protobuf package pin, rather than its different module version.
+printf 'protobuf\n' > "$directory/external.txt"
+install_pie
+jq -e --slurpfile manifest "$config" '
+    .[7:] == [$manifest[0].pie_packages.protobuf.package + ":" +
+        $manifest[0].pie_packages.protobuf.version] and
+    ($manifest[0].pie_packages.protobuf.version != $manifest[0].pie_packages.protobuf.module_version)
+' "$ARGUMENT_LOG" > /dev/null
+printf 'redis\n' > "$directory/external.txt"
 
 # Pass spaces and shell syntax literally as a single command argument.
 # Bypass pin validation in this fixture to exercise argument handling directly.

@@ -49,6 +49,9 @@ def manifests(root):
         for package in config['pie_packages'].values():
             if not re.fullmatch(r'\d+(?:\.\d+){1,3}', package['version']):
                 raise ResolutionError('PIE versions must be exact stable pins')
+            if 'module_version' in package and (not isinstance(package['module_version'], str) or
+                    not re.fullmatch(r'\d+(?:\.\d+){1,3}', package['module_version'])):
+                raise ResolutionError('PIE module versions must be exact stable pins')
         if not re.fullmatch(r'v?\d+\.\d+\.\d+', config['xhprof']['tag']) or not re.fullmatch(r'[a-f0-9]{40}', config['xhprof']['commit']):
             raise ResolutionError('XHProf requires a stable tag and full commit')
         for arch, apk_arch in [('amd64', 'x86_64'), ('arm64', 'aarch64')]:
@@ -69,7 +72,7 @@ def manifests(root):
                             'extensions': config['extensions'], 'packages': config.get('packages', ''),
                             'tagMinor': minor + suffix, 'tagPatch': version + suffix,
                             'source_ref': source_ref,
-                            'extension_versions': {name: data['version'] for name, data in config['pie_packages'].items() if name in names},
+                            'extension_versions': {name: data.get('module_version', data['version']) for name, data in config['pie_packages'].items() if name in names},
                             'xhprof': config['xhprof'] if 'xhprof' in names else None,
                             'composer_version': tools['COMPOSER_IMAGE'].split('@')[0].rsplit(':', 1)[1].removesuffix('-bin')})
     if not entries:
