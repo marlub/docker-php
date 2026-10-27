@@ -37,7 +37,7 @@
     },
     "grpc": {
       "package": "grpc/grpc-php-ext",
-      "version": "1.84.1",
+      "version": "1.85.0",
       "configure_options": []
     },
     "protobuf": {
