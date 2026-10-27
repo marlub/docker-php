@@ -10,13 +10,19 @@ on:
         options: ['All', '8.2', '8.3', '8.4', '8.5']
   push:
     branches: [main]
-    paths:
-      - Dockerfile
-      - entrypoint.sh
-      - build/**
-      - scripts/**
+    paths-ignore:
+      - docs/**
+      - README.md
+      - LICENSE
+      - renovate.json
+      - .github/workflows/template-renovate.yml
       - tests/**
-      - .github/workflows/**
+      - scripts/test_image.sh
+      - scripts/verify_image.py
+      - scripts/plan_ci.py
+      - scripts/image_config.py
+      - scripts/refresh_apk_locks.py
+      - .github/workflows/build-test.yml
 
 permissions:
   contents: read
@@ -33,11 +39,11 @@ env:
 
 jobs:
   select-variants:
-    name: Select affected variants
+    name: Plan publication
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.select.outputs.matrix }}
-      has_changes: ${{ steps.select.outputs.has_changes }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
       source_ref: ${{ steps.source.outputs.ref }}
     steps:
       - name: Restrict manual publication to main
@@ -53,17 +59,17 @@ jobs:
       - name: Record build source
         id: source
         run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Select affected variants
-        id: select
+      - name: Plan publication
+        id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.event.before }}
           PHP_MINOR: ${{ inputs.php }}
         run: |
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
-            python scripts/select_images.py --php "$PHP_MINOR" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+            python scripts/plan_ci.py --php "$PHP_MINOR" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
           else
-            python scripts/select_images.py --base-ref "$BASE_REF" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+            python scripts/plan_ci.py --purpose publish --base-ref "$BASE_REF" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
           fi
 
   build-and-test:

@@ -46,12 +46,15 @@ Builds use the host architecture by default. Add `--platform linux/amd64` or `--
 Generate the complete matrix, select a PHP minor, or select committed changes against a Git reference:
 
 ```sh
-python3 scripts/select_images.py --out /tmp/php-build-matrix.json
-python3 scripts/select_images.py --php 8.4 --out /tmp/php-build-matrix.json
-python3 scripts/select_images.py --base-ref origin/main --out /tmp/php-build-matrix.json
+python3 scripts/plan_ci.py --out /tmp/php-build-matrix.json
+python3 scripts/plan_ci.py --php 8.4 --out /tmp/php-build-matrix.json
+python3 scripts/plan_ci.py --base-ref origin/main --out /tmp/php-build-matrix.json
+python3 scripts/plan_ci.py --purpose publish --base-ref origin/main --out /tmp/php-build-matrix.json
 ```
 
 Each command replaces the output file. Selection needs Git history but does not require Docker or network access. Fetch the comparison reference beforehand if it is unavailable locally. Without a selection option, all variants are included.
+
+`scripts/plan_ci.py` plans image builds and Renovate validation, checks publication supersession, and writes CI outputs. `scripts/image_config.py` loads and validates image configuration independently of Git and shares image metadata definitions with verification. `--purpose test` is the default; `--purpose publish` applies publication exclusions to Git changes. Selection JSON and GitHub outputs include `renovate_changes`, which is true when the diff touches `renovate.json` or the Renovate template. An unavailable reference fails planning; a zero `before` SHA on an initial push selects all variants and Renovate validation. Manual PHP selection behaves the same for both purposes and sets `renovate_changes=false` because no PR diff is evaluated.
 
 ## Update dependencies and extensions
 
@@ -97,17 +100,15 @@ Alpine repositories can remove historical package versions. If a pin becomes una
 
 The hosted Renovate app proposes updates to base images, extension versions, XHProf source pins, PIE and Composer images, GitHub Actions, and Alpine runtime packages. Stable patch, minor, package revision, and digest updates can merge after required checks pass; major updates require review. PHP minor versions and Node major 24 stay fixed until explicitly changed.
 
-Pull requests test the affected variants without publishing. Build-related pushes to `main` select variants from all changes in the push:
+The PR workflow and automatic publication use explicit `paths-ignore` filters: any changed path that is not ignored triggers the corresponding workflow. Both ignore exactly `docs/**` and the root `README.md` and `LICENSE`. Publication additionally ignores `renovate.json` and `.github/workflows/template-renovate.yml`; the PR workflow deliberately allows those paths so it can validate Renovate updates. A mixed change containing another path still triggers the workflow. New files, scripts, directories, and workflows run by default without needing an inclusion-list update.
 
-| Changed input | Variants selected |
-| --- | --- |
-| PHP minor manifest | That minor's PHP and Node variants |
-| Runtime package lock | All variants using that Alpine release |
-| Node-only Dockerfile configuration | Node variants |
-| Shared build sources, scripts, tests, or CI workflows | All variants |
-| Documentation, Renovate configuration, or unrelated files | None |
+When triggered, PRs run the image-related Python unit tests, then the existing selection job computes image selection and a separate `renovate_changes` flag from one Git diff against the target-base commit. Images are tested from the checked-out merge result without publishing. Changes to a PHP-minor manifest select its plain and Node variants; runtime package locks select variants using that Alpine release. Node-only Dockerfile changes select Node variants. Renovate configuration and the Renovate template select no images; every other non-ignored path selects all variants, including new or unrecognized files. New commits cancel superseded runs for the same PR, including called workflows.
 
-Each variant publishes its minor and patch tags only after its amd64 and arm64 builds and tests pass. CI publishes the tested images and verifies their source identity and architecture digests. Successful variants can publish independently of failures in other variants. A candidate overtaken by relevant changes on `main` is marked `Superseded` and leaves publication to the newer build.
+Automatic publication on `main` additionally ignores `tests/**`, `scripts/test_image.sh`, `scripts/verify_image.py`, `scripts/plan_ci.py`, `scripts/image_config.py`, `scripts/refresh_apk_locks.py`, and `.github/workflows/build-test.yml`. These explicit test/tooling exclusions do not trigger publication or broaden a mixed push's publication selection. For example, a PHP 8.3 manifest change combined with test changes tests all variants in the PR but publishes only the two PHP 8.3 variants. Publication selection covers the entire push, retains PHP-minor, Alpine-release, and Node-only targeting, and selects all variants for every other non-ignored path. Keep the planner's exclusion lists aligned with the workflow filters. Review exclusions if an ignored file becomes an image input.
+
+Renovate validation is a separate job within the same PR workflow, calling `.github/workflows/template-renovate.yml` only when `needs.read-matrix.outputs.renovate_changes == 'true'`. The reusable template keeps the version pin inline, installs Node, and runs `renovate-config-validator --strict --no-global renovate.json`. It has only a `workflow_call` trigger and no separate change-detection job or concurrency group. Changes to `renovate.json` or the template select Renovate validation; a validator-only update skips Docker image builds, while mixed image/Renovate changes run both jobs. Additions, deletions, and renames are detected by the existing selector, and Git errors fail selection. The final **Validate build outcome** job checks both jobs, requiring success when selected and an intentional skip otherwise.
+
+Each selected variant calls the reusable workflow independently. Its publication job depends on both architecture builds succeeding; a failed variant does not block other complete variants. Selected variants build and test on both architectures before updating minor and patch tags. Each architecture image is compiled once, tested locally on its CI runner, and transferred to the registry by digest. Candidate source/variant labels and the final tags' architecture digests are verified. A variant changed by a newer publication-relevant commit on `main` is reported as `Superseded`; its older candidate does not update tags. Later test-only or other excluded changes do not supersede publication candidates. Publication runs queue without replacing pending runs.
 
 ### Rebuild or recover images
 
@@ -117,6 +118,8 @@ Use a fresh manual run to recover failed variants, restore missing tags, or reco
 
 Rerunning an existing push workflow repeats its original selection.
 
+During publication, `plan_ci.py --check-current <variant-json> --github-output <file>` fetches current `main` and emits `superseded=true|false` using publication selection rules. Fetch errors fail the check. `verify_image.py --metadata --entry <variant-json> --platform linux/amd64` verifies registry architecture, revision, and variant identity; normal `--image` mode verifies the locally built image and installed versions.
+
 ### Set up a repository or fork
 
-Install the [hosted Renovate app](https://github.com/apps/renovate). Protect `main` with the required **Validate build outcome** check, require branches to be up to date, and allow Renovate to merge passing updates under the repository's review rules. Renovate performs the merges itself.
+Install the [hosted Renovate app](https://github.com/apps/renovate) for this repository and allow the bot to merge passing PRs under the repository's review rules. PR image tests and Renovate validation now share the **Validate build outcome** aggregate check. The former standalone **Validate Renovate configuration** workflow is replaced by the called job, so any branch-protection reference to that former check must be updated during rollout. The parent PR workflow still uses `paths-ignore` for documentation and can be absent on documentation-only PRs; globally requiring its checks would leave those PRs pending. Keep the parent workflow unfiltered or provide separate conditional enforcement if globally required checks are needed. Branch protection is configured separately from these repository files and is not changed by this update. Renovate merges PRs itself (`platformAutomerge: false`); no publication-workflow GitHub App secret is needed.

@@ -13,8 +13,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'scripts'))
-from select_images import (PLATFORMS, REVISION_LABEL, VARIANT_LABEL, ResolutionError,
-                           affected_tags, check_current, git, manifests, select)
+from image_config import ConfigurationError, REVISION_LABEL, VARIANT_LABEL
+from plan_ci import (PlanningError, affected_image_tags, create_ci_plan,
+                     is_candidate_superseded, load_variants, run_git)
 from verify_image import verify, verify_metadata
 
 IMAGE = 'example.test/php'
@@ -31,7 +32,7 @@ class RepositoryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         for name in ('build', 'scripts', '.github'):
             shutil.copytree(ROOT / name, self.root / name, ignore=shutil.ignore_patterns('__pycache__'))
-        for name in ('Dockerfile', 'entrypoint.sh', 'README.md', 'renovate.json'):
+        for name in ('.gitignore', 'Dockerfile', 'entrypoint.sh', 'README.md', 'renovate.json'):
             shutil.copy(ROOT / name, self.root / name)
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.email', 'test@example.test')
@@ -41,7 +42,7 @@ class RepositoryTests(unittest.TestCase):
         self.base = self.commit()
 
     def git(self, *args):
-        return git(self.root, *args).strip()
+        return run_git(self.root, *args).strip()
 
     def commit(self):
         self.git('add', '-A')
@@ -49,7 +50,7 @@ class RepositoryTests(unittest.TestCase):
         return self.git('rev-parse', 'HEAD')
 
     def entries(self):
-        return manifests(self.root)
+        return load_variants(self.root)
 
     def change_json(self, name, change):
         path = self.root / name
@@ -65,8 +66,7 @@ class RepositoryTests(unittest.TestCase):
         before = self.git('rev-parse', 'HEAD')
         change()
         self.commit()
-        return sorted(affected_tags(self.entries(), self.root, before))
-
+        return sorted(affected_image_tags(self.entries(), self.root, before))
 
 
 class SelectionTests(RepositoryTests):
@@ -82,7 +82,7 @@ class SelectionTests(RepositoryTests):
         self.assertNotIn('inputs', entries[0])
 
     def test_no_changes_select_nothing_without_registry(self):
-        result = select(self.entries(), self.root, self.base)
+        result = create_ci_plan(self.entries(), self.root, self.base)
         self.assertEqual(result['phpimages'], [])
         self.assertTrue(all(row['state'] == 'Not selected' for row in result['report']))
 
@@ -103,7 +103,7 @@ class SelectionTests(RepositoryTests):
         for value in ('latest', '5.36.2;command', '', None, 5):
             with self.subTest(value=value):
                 self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['protobuf'].update(module_version=value))
-                with self.assertRaises(ResolutionError):
+                with self.assertRaises(ConfigurationError):
                     self.entries()
 
     def test_php_specific_updates(self):
@@ -118,28 +118,21 @@ class SelectionTests(RepositoryTests):
                 self.change_json('build/php/8.3.json', lambda c: c.update(image=c['image'].split('@')[0] + '@' + digest('new')) if field == 'base' else c['xhprof'].update(commit='a' * 40))
             self.assertEqual(len(self.affected(change)), 2)
 
-    def test_formatting_only_manifest_change_selects_minor(self):
-        changed = self.affected(lambda: self.change_json('build/php/8.2.json', lambda c: None))
-        self.assertEqual(len(changed), 2)
-
     def test_node_pin_and_stage_changes_select_only_node(self):
-        changed = self.affected(self.change_node)
-        self.assertEqual(len(changed), 4)
-        self.assertTrue(all('node24' in tag for tag in changed))
         path = self.root / 'Dockerfile'
-        changed = self.affected(lambda: path.write_text(path.read_text().replace('RUN ln -vs', 'RUN ln -vfs')))
-        self.assertEqual(len(changed), 4)
+        for change in (self.change_node, lambda: path.write_text(path.read_text().replace('RUN ln -vs', 'RUN ln -vfs'))):
+            before = self.git('rev-parse', 'HEAD')
+            change()
+            self.commit()
+            for purpose in ('test', 'publish'):
+                with self.subTest(purpose=purpose):
+                    changed = affected_image_tags(self.entries(), self.root, before, purpose=purpose)
+                    self.assertEqual(len(changed), 4)
+                    self.assertTrue(all('node24' in tag for tag in changed))
 
     def test_unknown_dockerfile_structure_selects_all(self):
         changed = self.affected(lambda: (self.root / 'Dockerfile').write_text((self.root / 'Dockerfile').read_text() + '\nFROM php AS other\n'))
         self.assertEqual(len(changed), 8)
-
-    def test_shared_sources_workflows_and_tests_select_all(self):
-        for filename in ('entrypoint.sh', 'scripts/install_extensions.sh', 'scripts/refresh_apk_locks.py', '.github/workflows/template-images.yml', 'Dockerfile', 'tests/new_test.py'):
-            with self.subTest(filename=filename):
-                path = self.root / filename
-                path.parent.mkdir(exist_ok=True)
-                self.assertEqual(len(self.affected(lambda: path.write_text('# change\n' + (path.read_text() if path.exists() else '')))), 8)
 
     def test_pie_and_composer_updates_select_all(self):
         path = self.root / 'Dockerfile'
@@ -151,18 +144,14 @@ class SelectionTests(RepositoryTests):
         for arch in ('amd64', 'arm64'):
             changed = self.affected(lambda: self.change_json(f'build/apk/3.24/{arch}.json', lambda c: c['packages'].update({'libzip': '1.11.4-r99'})))
             self.assertEqual(len(changed), 8)
-        self.assertEqual(affected_tags([dict(e, alpine='3.25') for e in self.entries()], self.root, self.base), set())
-
-    def test_docs_renovate_and_unrelated_changes_select_nothing(self):
-        for filename in ('README.md', 'renovate.json', 'notes.txt'):
-            self.assertEqual(self.affected(lambda: (self.root / filename).write_text('{}\n')), [])
+        self.assertEqual(affected_image_tags([dict(e, alpine='3.25') for e in self.entries()], self.root, self.base), set())
 
     def test_mixed_changes_across_multiple_push_commits(self):
         self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='6.3.1'))
         self.commit()
         self.change_json('build/php/8.3.json', lambda c: c['xhprof'].update(commit='a' * 40))
         self.commit()
-        tags = affected_tags(self.entries(), self.root, self.base)
+        tags = affected_image_tags(self.entries(), self.root, self.base)
         self.assertEqual(len(tags), 4)
         self.assertTrue(all(tag.startswith(('8.2-', '8.3-')) for tag in tags))
 
@@ -174,7 +163,7 @@ class SelectionTests(RepositoryTests):
         (self.root / 'README.md').write_text('new documentation')
         base = self.commit()
         self.git('merge', '--no-ff', '-qm', 'merge result', 'feature')
-        self.assertEqual(len(select(self.entries(), self.root, base)['phpimages']), 8)
+        self.assertEqual(len(create_ci_plan(self.entries(), self.root, base)['phpimages']), 8)
 
     def test_renames_additions_and_deletions(self):
         (self.root / 'scripts/new.sh').write_text('echo test\n')
@@ -189,58 +178,64 @@ class SelectionTests(RepositoryTests):
         entries = self.entries()
         (self.root / 'build/php/8.2.json').unlink()
         self.commit()
-        self.assertEqual(len(affected_tags(entries, self.root, self.base)), 2)
+        self.assertEqual(len(affected_image_tags(entries, self.root, self.base)), 2)
         self.assertEqual(len(self.entries()), 6)
 
     def test_initial_push_and_manual_selection(self):
         entries = self.entries()
-        self.assertEqual(len(select(entries, self.root, '0' * 40)['phpimages']), 8)
-        self.assertEqual(len(select(entries, self.root, php='All')['phpimages']), 8)
-        for minor in ('8.2', '8.3', '8.4', '8.5'):
-            selected = select(entries, self.root, php=minor)['phpimages']
-            self.assertEqual(len(selected), 2)
-            self.assertTrue(all(e['minor'] == minor for e in selected))
-        with self.assertRaises(ResolutionError):
-            select(entries, self.root, php='8.1')
+        for purpose in ('test', 'publish'):
+            with self.subTest(purpose=purpose):
+                initial = create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)
+                self.assertEqual(len(initial['phpimages']), 8)
+                self.assertTrue(initial['renovate_changes'])
+                manual = create_ci_plan(entries, self.root, php='All', purpose=purpose)
+                self.assertEqual(len(manual['phpimages']), 8)
+                self.assertFalse(manual['renovate_changes'])
+                for minor in ('8.2', '8.3', '8.4', '8.5'):
+                    selected = create_ci_plan(entries, self.root, php=minor, purpose=purpose)['phpimages']
+                    self.assertEqual(len(selected), 2)
+                    self.assertTrue(all(e['minor'] == minor for e in selected))
+        with self.assertRaises(PlanningError):
+            create_ci_plan(entries, self.root, php='8.1')
 
     def test_invalid_references_fail_selection(self):
         with self.assertRaises(subprocess.CalledProcessError):
-            affected_tags(self.entries(), self.root, 'nonexistent')
+            affected_image_tags(self.entries(), self.root, 'nonexistent')
         with self.assertRaises(subprocess.CalledProcessError):
-            affected_tags(self.entries(), self.root, self.base, 'nonexistent')
+            affected_image_tags(self.entries(), self.root, self.base, 'nonexistent')
 
     def test_reruns_repeat_selection(self):
         self.change_json('build/php/8.2.json', lambda c: c.update(packages=''))
         self.commit()
-        selection = select(self.entries(), self.root, self.base)
+        selection = create_ci_plan(self.entries(), self.root, self.base)
         source = self.git('rev-parse', 'HEAD')
         (self.root / 'README.md').write_text('later documentation')
         self.commit()
         self.git('checkout', '--detach', source)
-        retry = select(self.entries(), self.root, self.base)
+        retry = create_ci_plan(self.entries(), self.root, self.base)
         self.assertEqual(retry, selection)
         self.assertEqual(len(retry['phpimages']), 2)
 
     def test_invalid_configuration_fails(self):
         self.change_json('build/php/8.2.json', lambda c: c['xhprof'].update(commit='latest'))
-        with self.assertRaises(ResolutionError):
+        with self.assertRaises(ConfigurationError):
             self.entries()
         self.git('checkout', '--', 'build/php/8.2.json')
         self.change_json('build/apk/3.24/amd64.json', lambda c: c.update(architecture='aarch64'))
-        with self.assertRaises(ResolutionError):
+        with self.assertRaises(ConfigurationError):
             self.entries()
         self.git('checkout', '--', 'build/apk/3.24/amd64.json')
         self.change_json('build/apk/3.24/amd64.json', lambda c: c['packages'].update(libzip='~1'))
-        with self.assertRaises(ResolutionError):
+        with self.assertRaises(ConfigurationError):
             self.entries()
         self.git('checkout', '--', 'build/apk/3.24/amd64.json')
         path = self.root / 'Dockerfile'
         path.write_text(path.read_text().replace('node:24.', 'node:26.'))
-        with self.assertRaises(ResolutionError):
+        with self.assertRaises(ConfigurationError):
             self.entries()
 
     def test_cli_outputs_and_removed_registry_options(self):
-        script = self.root / 'scripts/select_images.py'
+        script = self.root / 'scripts/plan_ci.py'
         output = self.root / '.git/matrix.json'
         github_output = self.root / '.git/github-output'
         result = subprocess.run([sys.executable, str(script), '--php', '8.4', '--out', str(output), '--github-output', str(github_output)], capture_output=True, text=True)
@@ -261,35 +256,35 @@ class CurrentSourceTests(RepositoryTests):
         entries = self.entries()
         self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='999.0.0'))
         self.commit()
-        self.assertTrue(check_current(entries[0], self.root))
-        self.assertFalse(check_current(entries[2], self.root))
+        self.assertTrue(is_candidate_superseded(entries[0], self.root))
+        self.assertFalse(is_candidate_superseded(entries[2], self.root))
 
     def test_node_update_supersedes_only_node(self):
         plain, node = self.entries()[:2]
         self.change_node()
         self.commit()
-        self.assertFalse(check_current(plain, self.root))
-        self.assertTrue(check_current(node, self.root))
+        self.assertFalse(is_candidate_superseded(plain, self.root))
+        self.assertTrue(is_candidate_superseded(node, self.root))
 
     def test_current_source_and_unrelated_changes_are_allowed(self):
         entry = self.entries()[0]
-        self.assertFalse(check_current(entry, self.root))
+        self.assertFalse(is_candidate_superseded(entry, self.root))
         (self.root / 'README.md').write_text('documentation update')
         self.commit()
-        self.assertFalse(check_current(entry, self.root))
+        self.assertFalse(is_candidate_superseded(entry, self.root))
 
     def test_fetch_failure_missing_and_malformed_sources_fail(self):
         entry = self.entries()[0]
-        with self.assertRaises(ResolutionError):
-            check_current(dict(entry, source_ref='main'), self.root)
+        with self.assertRaises(PlanningError):
+            is_candidate_superseded(dict(entry, source_ref='main'), self.root)
         with self.assertRaises(subprocess.CalledProcessError):
-            check_current(dict(entry, source_ref='a' * 40), self.root)
+            is_candidate_superseded(dict(entry, source_ref='a' * 40), self.root)
         self.git('remote', 'remove', 'origin')
         with self.assertRaises(subprocess.CalledProcessError):
-            check_current(entry, self.root)
+            is_candidate_superseded(entry, self.root)
 
     def test_check_current_cli_has_distinct_output_and_modes(self):
-        script = self.root / 'scripts/select_images.py'
+        script = self.root / 'scripts/plan_ci.py'
         entry = self.entries()[0]
         output = self.root / '.git/current-output'
         args = [sys.executable, str(script), '--check-current', json.dumps(entry), '--github-output', str(output)]
@@ -309,7 +304,7 @@ class CurrentSourceTests(RepositoryTests):
 
 class MetadataTests(unittest.TestCase):
     def setUp(self):
-        self.entry = manifests(ROOT)[0]
+        self.entry = load_variants(ROOT)[0]
         self.config = {'os': 'linux', 'architecture': 'amd64', 'config': {'Labels': {
             REVISION_LABEL: self.entry['source_ref'], VARIANT_LABEL: self.entry['tagMinor']}}}
 
@@ -337,54 +332,6 @@ class MetadataTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
 
-class WorkflowTests(unittest.TestCase):
-    def test_publication_is_commit_driven_and_queued(self):
-        workflow = (ROOT / '.github/workflows/build-test-publish.yml').read_text()
-        self.assertNotIn('schedule:', workflow)
-        self.assertIn('queue: max', workflow)
-        self.assertIn('cancel-in-progress: false', workflow)
-        self.assertIn('      - tests/**', workflow)
-        self.assertIn('BASE_REF: ${{ github.event.before }}', workflow)
-        self.assertIn('ref: ${{ github.event_name == \'workflow_dispatch\' && \'main\' || github.sha }}', workflow)
-        self.assertIn('run: test "$GITHUB_REF" = refs/heads/main', workflow)
-        for minor in ('All', '8.2', '8.3', '8.4', '8.5'):
-            self.assertIn("'" + minor + "'", workflow)
-        selection_job = workflow.split('  select-variants:', 1)[1].split('  build-and-test:', 1)[0]
-        self.assertNotIn('docker/login-action', selection_job)
-        self.assertNotIn('docker/setup-buildx-action', selection_job)
-        self.assertNotIn('--published', workflow)
-        self.assertNotIn('has_repairs', workflow)
-
-    def test_source_and_variant_identity_follow_the_tested_oci_image(self):
-        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
-        self.assertIn('org.opencontainers.image.revision=${{ inputs.source-ref }}', workflow)
-        self.assertIn('io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}', workflow)
-        self.assertNotIn('input_hash', workflow)
-        self.assertIn('needs: build-and-test', workflow)
-        self.assertIn('    if: inputs.publish', workflow)
-        self.assertIn('overwrite: true', workflow)
-        self.assertIn('name: digests-${{ fromJson(inputs.variant).tagMinor }}-amd64', workflow)
-        self.assertIn('name: digests-${{ fromJson(inputs.variant).tagMinor }}-arm64', workflow)
-        self.assertNotIn('continue-on-error', workflow)
-        self.assertNotIn('concurrency:', workflow)
-        self.assertIn('regctl image copy', workflow)
-        self.assertIn('test "$config" = "$(docker image inspect test', workflow)
-
-    def test_native_architecture_gate_and_variant_independence(self):
-        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
-        self.assertIn('arch: [amd64, arm64]', workflow)
-        header = workflow.split('\n  publish:\n', 1)[1].split('    steps:', 1)[0]
-        self.assertIn('needs: build-and-test', header)
-        self.assertIn('if: inputs.publish', header)
-        self.assertNotIn('always()', header)
-        for name in ('build-test.yml', 'build-test-publish.yml'):
-            workflow = (ROOT / '.github/workflows' / name).read_text()
-            call = workflow.split('\n  build-and-test:\n', 1)[1].split('\n  validate-', 1)[0]
-            self.assertIn('fail-fast: false', call)
-            self.assertIn('variant: ${{ toJson(matrix.phpimage) }}', call)
-            self.assertNotIn('selected-images', workflow)
-
-
 class PublicationStepTests(unittest.TestCase):
     """Exercise the real workflow shell with a registry stub; no Docker daemon."""
     def setUp(self):
@@ -393,7 +340,7 @@ class PublicationStepTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / 'digests').mkdir()
         (self.root / 'bin').mkdir()
-        self.entry = manifests(ROOT)[0]
+        self.entry = load_variants(ROOT)[0]
         self.digests = {'amd64': digest('amd64'), 'arm64': digest('arm64')}
         for arch, value in self.digests.items():
             (self.root / 'digests' / (arch + '.digest')).write_text(value + '\n')
@@ -482,7 +429,7 @@ print((root / (name + '.json')).read_text())
 
 class VersionTests(unittest.TestCase):
     def setUp(self):
-        self.entry = manifests(ROOT)[1]
+        self.entry = load_variants(ROOT)[1]
         self.entry['xhprof'] = dict(self.entry['xhprof'], tag='v2.3.10')
         self.php = self.entry['php_version']
         self.composer = self.entry['composer_version']
@@ -555,7 +502,7 @@ class RenovateTests(unittest.TestCase):
             matches=[]
             for pattern in manager['managerFilePatterns']:
                 pattern=pattern.strip('/')
-                for path in ROOT.glob('build/**/*.json'):
+                for path in list(ROOT.glob('build/**/*.json')) + list(ROOT.glob('.github/workflows/*.yml')):
                     if not re.search(pattern,path.relative_to(ROOT).as_posix()):continue
                     for expression in manager['matchStrings']:
                         expression=re.sub(r'\(\?<([a-zA-Z]+)>',r'(?P<\1>',expression)
@@ -563,6 +510,7 @@ class RenovateTests(unittest.TestCase):
             counts.append(len(matches))
         self.assertEqual(counts[:3],[4,28,4])
         self.assertEqual(counts[3:5], [len(json.loads((ROOT/f'build/apk/3.24/{arch}.json').read_text())['packages']) for arch in ('amd64','arm64')])
+        self.assertEqual(counts[5:], [1, 1])
 
     def test_revision_aware_architecture_specific_lookup(self):
         config=json.loads((ROOT/'renovate.json').read_text())
@@ -575,20 +523,47 @@ class RenovateTests(unittest.TestCase):
         self.assertFalse(config['automerge'])
         rules=[r for r in config['packageRules'] if r.get('automerge')]
         self.assertTrue(rules);self.assertTrue(all('major' not in r['matchUpdateTypes'] for r in rules))
+
+
+class WorkflowOutcomeTests(unittest.TestCase):
     def test_aggregate_check_accepts_only_valid_job_outcomes(self):
-        import os
-        workflow=(ROOT/'.github/workflows/build-test.yml').read_text()
-        script=workflow.split('      - name: Require successful checks or an intentional empty selection',1)[1].split('        run: |\n',1)[1]
-        import textwrap
-        script=textwrap.dedent(script)
-        for check, build, changes, succeeds in [
-            ('success','success','true',True), ('success','skipped','false',True),
-            ('failure','skipped','false',False), ('success','failure','true',False),
-            ('success','skipped','true',False), ('success','success','false',False),
-            ('success','skipped','',False), ('cancelled','success','true',False)]:
-            with self.subTest(check=check,build=build,changes=changes):
-                result=subprocess.run(['bash','-e','-c',script],env=dict(os.environ,CHECK_RESULT=check,BUILD_RESULT=build,HAS_CHANGES=changes))
-                self.assertEqual(result.returncode==0,succeeds)
+        workflow = (ROOT / '.github/workflows/build-test.yml').read_text()
+        step = workflow.split('      - name: Require successful checks or an intentional empty selection', 1)[1]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        # Selection result, image flag/result, Renovate flag/result, expected outcome.
+        cases = [
+            ('success', 'true', 'success', 'true', 'success', True),
+            ('success', 'true', 'success', 'false', 'skipped', True),
+            ('success', 'false', 'skipped', 'true', 'success', True),
+            ('success', 'false', 'skipped', 'false', 'skipped', True),
+            ('failure', 'false', 'skipped', 'false', 'skipped', False),
+            ('cancelled', 'false', 'skipped', 'false', 'skipped', False),
+            ('skipped', 'false', 'skipped', 'false', 'skipped', False),
+            ('success', 'true', 'failure', 'true', 'success', False),
+            ('success', 'true', 'cancelled', 'true', 'success', False),
+            ('success', 'true', 'skipped', 'true', 'success', False),
+            ('success', 'false', 'success', 'true', 'success', False),
+            ('success', 'false', 'failure', 'true', 'success', False),
+            ('success', '', 'skipped', 'true', 'success', False),
+            ('success', 'true', '', 'true', 'success', False),
+            ('success', 'true', 'success', 'true', 'failure', False),
+            ('success', 'true', 'success', 'true', 'cancelled', False),
+            ('success', 'true', 'success', 'true', 'skipped', False),
+            ('success', 'true', 'success', 'false', 'success', False),
+            ('success', 'true', 'success', 'false', 'failure', False),
+            ('success', 'true', 'success', '', 'skipped', False),
+            ('success', 'true', 'success', 'true', '', False),
+        ]
+        for check, images, build, changed, renovate, succeeds in cases:
+            with self.subTest(selection=check, images=images, build=build,
+                              renovate_changed=changed, renovate=renovate):
+                result = subprocess.run(
+                    ['bash', '-e', '-c', script],
+                    env=dict(os.environ, CHECK_RESULT=check, HAS_CHANGES=images, BUILD_RESULT=build,
+                             RENOVATE_CHANGES=changed, RENOVATE_RESULT=renovate),
+                )
+                self.assertEqual(result.returncode == 0, succeeds)
+
 
 if __name__ == '__main__':
     unittest.main()

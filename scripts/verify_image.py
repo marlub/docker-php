@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 import sys
-from select_images import REVISION_LABEL, VARIANT_LABEL
+from image_config import REVISION_LABEL, VARIANT_LABEL
 
 
 def verify_metadata(config, entry, platform):

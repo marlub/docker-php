@@ -2,17 +2,26 @@ name: Test PHP images with extensions
 
 on:
   pull_request:
+    paths-ignore:
+      - docs/**
+      - README.md
+      - LICENSE
 
 permissions:
   contents: read
 
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   read-matrix:
-    name: Select affected variants
+    name: Plan CI jobs
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.select.outputs.matrix }}
-      has_changes: ${{ steps.select.outputs.has_changes }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      renovate_changes: ${{ steps.plan.outputs.renovate_changes }}
       source_ref: ${{ steps.source.outputs.ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -23,19 +32,19 @@ jobs:
           python-version: '3.11'
       - name: Validate configuration and publication logic
         run: python -m unittest discover -s tests -v
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: '24'
-      - name: Validate Renovate configuration
-        run: npx --yes --package renovate@44.181.5 renovate-config-validator --strict
       - name: Record build source
         id: source
         run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Select affected variants
-        id: select
+      - name: Plan CI jobs
+        id: plan
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: python scripts/select_images.py --base-ref "$BASE_REF" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        run: python scripts/plan_ci.py --base-ref "$BASE_REF" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+  validate-renovate:
+    needs: read-matrix
+    if: needs.read-matrix.outputs.renovate_changes == 'true'
+    uses: ./.github/workflows/template-renovate.yml
 
   build-and-test:
     name: ${{ matrix.phpimage.tagMinor }}
@@ -56,7 +65,7 @@ jobs:
   validate-build-and-test:
     name: Validate build outcome
     runs-on: ubuntu-latest
-    needs: [read-matrix, build-and-test]
+    needs: [read-matrix, build-and-test, validate-renovate]
     if: always()
     steps:
       - name: Require successful checks or an intentional empty selection
@@ -64,6 +73,8 @@ jobs:
           CHECK_RESULT: ${{ needs.read-matrix.result }}
           BUILD_RESULT: ${{ needs.build-and-test.result }}
           HAS_CHANGES: ${{ needs.read-matrix.outputs.has_changes }}
+          RENOVATE_RESULT: ${{ needs.validate-renovate.result }}
+          RENOVATE_CHANGES: ${{ needs.read-matrix.outputs.renovate_changes }}
         run: |
           test "$CHECK_RESULT" = success
           if [ "$HAS_CHANGES" = true ]; then
@@ -71,4 +82,10 @@ jobs:
           else
             test "$HAS_CHANGES" = false
             test "$BUILD_RESULT" = skipped
+          fi
+          if [ "$RENOVATE_CHANGES" = true ]; then
+            test "$RENOVATE_RESULT" = success
+          else
+            test "$RENOVATE_CHANGES" = false
+            test "$RENOVATE_RESULT" = skipped
           fi

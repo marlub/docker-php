@@ -192,7 +192,7 @@
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "/^\\.github\\/workflows\\/build-test\\.yml$/"
+        "/^\\.github\\/workflows\\/template-renovate\\.yml$/"
       ],
       "matchStrings": [
         "--package renovate@(?<currentValue>[0-9.]+)"
