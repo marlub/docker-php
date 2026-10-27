@@ -26,6 +26,8 @@ extension_plan() {
         if all($external[]; $config.pie_packages[.] |
             (.package | test("^[a-z0-9_.-]+/[a-z0-9_.-]+\\z")) and
             (.version | test("^[0-9]+(\\.[0-9]+){1,3}\\z")) and
+            ((has("module_version") | not) or
+                (.module_version | type == "string" and test("^[0-9]+(\\.[0-9]+){1,3}\\z"))) and
             (.configure_options | type == "array" and all(.[];
                 test("^--[a-z0-9-]+(=[a-z0-9/.+-]+)?\\z")))) | not then
             error("Invalid PIE pin or configure option")

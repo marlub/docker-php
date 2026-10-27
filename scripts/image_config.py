@@ -68,6 +68,12 @@ def _validate_extensions(config: dict[str, Any], minor: str) -> None:
     for package in config["pie_packages"].values():
         if not re.fullmatch(r"\d+(?:\.\d+){1,3}", package["version"]):
             raise ConfigurationError("PIE versions must be exact stable pins")
+        if "module_version" in package:
+            module_version = package["module_version"]
+            if not isinstance(module_version, str) or not re.fullmatch(
+                r"\d+(?:\.\d+){1,3}", module_version
+            ):
+                raise ConfigurationError("PIE module versions must be exact stable pins")
     xhprof = config["xhprof"]
     if not re.fullmatch(r"v?\d+\.\d+\.\d+", xhprof["tag"]) or not re.fullmatch(
         r"[a-f0-9]{40}", xhprof["commit"]
@@ -117,7 +123,7 @@ def _manifest_variants(
 
     extensions = config["extensions"].split()
     extension_versions = {
-        name: package["version"]
+        name: package.get("module_version", package["version"])
         for name, package in config["pie_packages"].items()
         if name in extensions
     }

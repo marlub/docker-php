@@ -1,6 +1,6 @@
 {
   "image": "php:8.3.36-fpm-alpine3.24@sha256:25e15cf35ed0f5b75d8cf14fc2c4ed7e0e6bee00d359e681b7fa3e91a7bee49f",
-  "extensions": "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof",
+  "extensions": "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof opentelemetry grpc protobuf",
   "packages": "",
   "pie_packages": {
     "redis": {
@@ -28,6 +28,22 @@
     "pcov": {
       "package": "pecl/pcov",
       "version": "1.0.12",
+      "configure_options": []
+    },
+    "opentelemetry": {
+      "package": "open-telemetry/ext-opentelemetry",
+      "version": "1.4.2",
+      "configure_options": []
+    },
+    "grpc": {
+      "package": "grpc/grpc-php-ext",
+      "version": "1.85.0",
+      "configure_options": []
+    },
+    "protobuf": {
+      "package": "extport/protobuf",
+      "version": "36.2.0.1",
+      "module_version": "5.36.2",
       "configure_options": []
     }
   },
