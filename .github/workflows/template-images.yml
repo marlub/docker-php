@@ -67,7 +67,7 @@ jobs:
             *.output=type=docker
             ${{ inputs.publish && format('*.output+=type=oci,dest={0}/image.tar', runner.temp) || '' }}
             *.cache-from=type=gha,version=2,scope=${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }}
-            *.cache-to=type=gha,version=2,scope=${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }},mode=max,ignore-error=true,ghtoken=${{ secrets.GITHUB_TOKEN }},repository=${{ github.repository }}
+            ${{ inputs.publish && github.ref == 'refs/heads/main' && format('*.cache-to=type=gha,version=2,scope={0}-{1},mode=max,ignore-error=true,ghtoken={2},repository={3}', fromJson(inputs.variant).tagMinor, matrix.arch, secrets.GITHUB_TOKEN, github.repository) || '' }}
             *.labels.io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}
             *.labels.org.opencontainers.image.revision=${{ inputs.source-ref }}
       - name: Test built image
