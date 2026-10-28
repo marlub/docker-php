@@ -26,7 +26,7 @@
     },
     {
       "matchFileNames": [
-        "build/php/8.2.json"
+        "build/php/8.2.hcl"
       ],
       "additionalBranchPrefix": "php82-",
       "constraints": {
@@ -35,7 +35,7 @@
     },
     {
       "matchFileNames": [
-        "build/php/8.3.json"
+        "build/php/8.3.hcl"
       ],
       "additionalBranchPrefix": "php83-",
       "constraints": {
@@ -44,7 +44,7 @@
     },
     {
       "matchFileNames": [
-        "build/php/8.4.json"
+        "build/php/8.4.hcl"
       ],
       "additionalBranchPrefix": "php84-",
       "constraints": {
@@ -53,7 +53,7 @@
     },
     {
       "matchFileNames": [
-        "build/php/8.5.json"
+        "build/php/8.5.hcl"
       ],
       "additionalBranchPrefix": "php85-",
       "constraints": {
@@ -74,7 +74,7 @@
         "php"
       ],
       "matchFileNames": [
-        "build/php/8.2.json"
+        "build/php/8.2.hcl"
       ],
       "allowedVersions": "/^8\\.2\\./"
     },
@@ -86,7 +86,7 @@
         "php"
       ],
       "matchFileNames": [
-        "build/php/8.3.json"
+        "build/php/8.3.hcl"
       ],
       "allowedVersions": "/^8\\.3\\./"
     },
@@ -98,7 +98,7 @@
         "php"
       ],
       "matchFileNames": [
-        "build/php/8.4.json"
+        "build/php/8.4.hcl"
       ],
       "allowedVersions": "/^8\\.4\\./"
     },
@@ -110,7 +110,7 @@
         "php"
       ],
       "matchFileNames": [
-        "build/php/8.5.json"
+        "build/php/8.5.hcl"
       ],
       "allowedVersions": "/^8\\.5\\./"
     },
@@ -134,10 +134,10 @@
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "/^build\\/php\\/8\\.[2-5]\\.json$/"
+        "/^build\\/php\\/8\\.\\d+\\.hcl$/"
       ],
       "matchStrings": [
-        "\"image\": \"(?<depName>php):(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
+        "PHP_BASE_IMAGE\\s*=\\s*\"(?<depName>php):(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
       ],
       "datasourceTemplate": "docker",
       "versioningTemplate": "docker"
@@ -145,10 +145,10 @@
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "/^build\\/php\\/8\\.[2-5]\\.json$/"
+        "/^build\\/php\\/8\\.\\d+\\.hcl$/"
       ],
       "matchStrings": [
-        "\"package\": \"(?<depName>[^\"]+)\",\\s*\"version\": \"(?<currentValue>[^\"]+)\""
+        "# renovate: datasource=packagist depName=(?<depName>[^\\s]+)\\s+[A-Z]+_VERSION\\s*=\\s*\"(?<currentValue>[^\"\\s]+)\""
       ],
       "datasourceTemplate": "packagist",
       "versioningTemplate": "composer"
@@ -156,10 +156,10 @@
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "/^build\\/php\\/8\\.[2-5]\\.json$/"
+        "/^build\\/php\\/8\\.\\d+\\.hcl$/"
       ],
       "matchStrings": [
-        "\"tag\": \"(?<currentValue>v?[0-9]+\\.[0-9]+\\.[0-9]+)\",\\s*\"commit\": \"(?<currentDigest>[a-f0-9]{40})\""
+        "XHPROF_TAG\\s*=\\s*\"(?<currentValue>v?[0-9]+\\.[0-9]+\\.[0-9]+)\"\\s+XHPROF_COMMIT\\s*=\\s*\"(?<currentDigest>[a-f0-9]{40})\""
       ],
       "depNameTemplate": "longxinH/xhprof",
       "datasourceTemplate": "github-tags",

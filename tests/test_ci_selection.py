@@ -19,20 +19,21 @@ class SelectionPurposeTests(RepositoryTests):
     def test_publication_inputs_and_pr_only_paths(self):
         cases = {
             'Dockerfile': (8, 8),
+            'docker-bake.hcl': (8, 8),
             'entrypoint.sh': (8, 8),
             'build/shared.json': (8, 8),
-            'build/php/8.3.json': (2, 2),
+            'build/php/8.3.hcl': (2, 2),
             'build/apk/3.24/amd64.json': (8, 8),
-            'scripts/install_extensions.sh': (8, 8),
+            'scripts/build_pie_extension.sh': (8, 8),
             'scripts/apk_lock.php': (8, 8),
-            'scripts/alpine_packages.sh': (8, 8),
             '.github/workflows/template-images.yml': (8, 8),
             '.github/workflows/build-test-publish.yml': (8, 8),
             '.github/workflows/build-test.yml': (8, 0),
+            '.github/workflows/cache-cleanup.yml': (0, 0),
             '.github/workflows/unknown.yml': (8, 8),
             'tests/new_test.py': (8, 0),
-            'scripts/test_image.sh': (8, 0),
-            'scripts/verify_image.py': (8, 0),
+            'tests/test_image.sh': (8, 0),
+            'tests/verify_image.py': (8, 0),
             'scripts/plan_ci.py': (8, 0),
             'scripts/image_config.py': (8, 0),
             'scripts/refresh_apk_locks.py': (8, 0),
@@ -67,7 +68,7 @@ class SelectionPurposeTests(RepositoryTests):
             with self.subTest(filename=filename):
                 before = self.git('rev-parse', 'HEAD')
                 self.change_file(filename)
-                self.change_json('build/php/8.3.json', lambda c: c['pie_packages']['redis'].update(version=f'6.3.{revision}'))
+                self.change_arg('8.3', 'REDIS_VERSION', f'6.3.{revision}')
                 self.commit()
                 tested = create_ci_plan(self.entries(), self.root, before)
                 self.assertEqual(len(tested['phpimages']), test_count)
@@ -77,7 +78,7 @@ class SelectionPurposeTests(RepositoryTests):
                                  ['8.3-fpm-alpine', '8.3-fpm-alpine-node24'])
 
     def test_installer_renames_and_deletions_select_publication(self):
-        path = self.root / 'scripts/install_extensions.sh'
+        path = self.root / 'scripts/build_pie_extension.sh'
         moved = self.root / 'scripts/maintenance.sh'
         path.rename(moved)
         self.commit()
@@ -108,8 +109,9 @@ class SelectionPurposeTests(RepositoryTests):
 
     def test_supersession_ignores_pr_only_paths_but_includes_pipeline(self):
         entry = self.entries()[0]
-        for filename in ('tests/new_test.py', 'scripts/verify_image.py', 'scripts/plan_ci.py',
+        for filename in ('tests/new_test.py', 'tests/verify_image.py', 'scripts/plan_ci.py',
                          'scripts/refresh_apk_locks.py', '.github/workflows/build-test.yml',
+                         '.github/workflows/cache-cleanup.yml',
                          '.github/workflows/template-renovate.yml', 'renovate.json'):
             with self.subTest(filename=filename):
                 self.change_file(filename)

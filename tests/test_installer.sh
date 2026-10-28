@@ -1,164 +1,69 @@
 #!/bin/sh
-# Test extension classification, pin validation, XHProf metadata,
-# and argument, working-directory, and failure handling.
+# Exercise the PIE helper with explicit pins and isolated command/artifact stubs.
 set -eu
-
-# Load installer functions and prepare isolated test files.
-if ! command -v jq > /dev/null; then
-    apk add --no-cache --virtual .installer-test-tools jq
-fi
-
 root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
-# shellcheck source=scripts/install_extensions.sh
-. "$root/scripts/install_extensions.sh"
-
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+export ARGUMENT_LOG="$temporary/arguments"
+export STRIP_LOG="$temporary/strip-arguments"
+export PHP_INI_DIR="$temporary/php"
+export EXTENSION_DIRECTORY="$temporary/extensions"
+export DESTDIR="$temporary/out"
+mkdir -p "$temporary/bin" "$EXTENSION_DIRECTORY" "$PHP_INI_DIR/conf.d"
+printf 'module\n' > "$EXTENSION_DIRECTORY/redis.so"
+printf 'extension=redis.so\n' > "$PHP_INI_DIR/conf.d/docker-php-ext-redis.ini"
+cat > "$temporary/bin/php" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > "$ARGUMENT_LOG"
+exit "${COMMAND_STATUS:-0}"
+STUB
+cat > "$temporary/bin/php-config" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$EXTENSION_DIRECTORY"
+STUB
+printf '#!/bin/sh\nexit 0\n' > "$temporary/bin/docker-php-ext-enable"
+cat > "$temporary/bin/strip" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > "$STRIP_LOG"
+[ "${STRIP_STATUS:-0}" -eq 0 ] || exit "$STRIP_STATUS"
+printf 'stripped module\n' > "$2"
+STUB
+chmod +x "$temporary/bin/php" "$temporary/bin/php-config" "$temporary/bin/docker-php-ext-enable" "$temporary/bin/strip"
+export PATH="$temporary/bin:$PATH"
 
-config="$root/build/php/8.4.json"
-plan="$temporary/plan.json"
-
-expect_failure() {
-    if ( "$@" ) > /dev/null 2>&1; then
-        echo "Expected installer rejection: $*" >&2
+rejects() {
+    if "$@" > /dev/null 2>&1; then
+        echo "Expected PIE helper rejection: $*" >&2
         exit 1
     fi
 }
 
-# Classify bundled, PIE, and source-built extensions separately.
-extension_plan "$config" 80400 'bcmath redis xhprof' > "$plan"
-jq -e '
-    .core == ["bcmath"] and
-    .external == ["redis"] and
-    .xhprof == true
-' "$plan" > /dev/null
+sh "$root/scripts/build_pie_extension.sh" redis phpredis/phpredis 6.3.0 true --enable-redis-lzf --with-liblzf=yes
+grep -qx 'phpredis/phpredis:6.3.0' "$ARGUMENT_LOG"
+grep -qx -- '--enable-redis-lzf' "$ARGUMENT_LOG"
+grep -qx -- '--with-liblzf=yes' "$ARGUMENT_LOG"
+grep -qx -- '--strip-unneeded' "$STRIP_LOG"
+grep -qx -- "$EXTENSION_DIRECTORY/redis.so" "$STRIP_LOG"
+grep -qx 'stripped module' "$DESTDIR$EXTENSION_DIRECTORY/redis.so"
+cmp "$EXTENSION_DIRECTORY/redis.so" "$DESTDIR$EXTENSION_DIRECTORY/redis.so"
+cmp "$PHP_INI_DIR/conf.d/docker-php-ext-redis.ini" "$DESTDIR/usr/local/etc/php/conf.d/docker-php-ext-redis.ini"
 
-# Telemetry modules use PIE on every supported PHP minor.
-for minor in 8.2 8.3 8.4 8.5; do
-    extension_plan "$root/build/php/$minor.json" "${minor%.*}0${minor#*.}00" \
-        'opentelemetry grpc protobuf' > "$plan"
-    jq -e '
-        .core == [] and
-        .external == ["opentelemetry", "grpc", "protobuf"] and
-        .xhprof == false
-    ' "$plan" > /dev/null
+# Disabled extensions need neither a pin nor any installation command.
+rm "$ARGUMENT_LOG" "$STRIP_LOG"
+sh "$root/scripts/build_pie_extension.sh" grpc grpc/grpc-php-ext '' false
+test ! -e "$ARGUMENT_LOG"
+test ! -e "$STRIP_LOG"
+
+# Package versions and options are literal validated arguments, never evaluated.
+for version in '' latest '6.3.0;command'; do
+    rejects sh "$root/scripts/build_pie_extension.sh" redis phpredis/phpredis "$version" true
 done
-
-# An empty selection must produce no installation targets.
-extension_plan "$config" 80400 '' > "$plan"
-jq -e '
-    .core == [] and
-    .external == [] and
-    .xhprof == false
-' "$plan" > /dev/null
-
-# Opcache is installable on PHP 8.4, but built into PHP 8.5.
-extension_plan "$config" 80400 opcache > "$plan"
-jq -e '.core == ["opcache"]' "$plan" > /dev/null
-expect_failure extension_plan "$config" 80500 opcache
-
-# Reject invalid extension names, PIE packages, versions, and configure options.
-expect_failure extension_plan "$config" 80400 'redis;echo unsafe'
-
-for change in \
-    '.package = "not-a-package"' \
-    '.version = "latest"' \
-    '.module_version = "latest"' \
-    '.module_version = null' \
-    '.module_version = 5' \
-    '.configure_options = ["--invalid;command"]'
-do
-    jq ".pie_packages.redis |= ($change)" "$config" > "$temporary/invalid.json"
-    expect_failure extension_plan "$temporary/invalid.json" 80400 redis
-done
-
-# XHProf source pins must use a full commit rather than a branch name.
-jq '.xhprof.commit = "main"' "$config" > "$temporary/invalid.json"
-expect_failure extension_plan "$temporary/invalid.json" 80400 xhprof
-
-# Preserve the source tag/commit while recording the module version independently.
-printf '#define XHPROF_VERSION "2.3.9"\n' > "$temporary/header.h"
-xhprof_record "$temporary/header.h" "$config" > "$temporary/record.json"
-jq -e --slurpfile manifest "$config" '
-    . == ($manifest[0].xhprof + {version: "2.3.9"})
-' "$temporary/record.json" > /dev/null
-
-# Reject headers with either a missing or an ambiguous module version.
-: > "$temporary/header.h"
-expect_failure xhprof_record "$temporary/header.h" "$config"
-
-printf '%s\n' \
-    '#define XHPROF_VERSION "1.0.0"' \
-    '#define XHPROF_VERSION "2.0.0"' \
-    > "$temporary/header.h"
-expect_failure xhprof_record "$temporary/header.h" "$config"
-
-# Stub build commands to observe their arguments and working directories.
-mkdir "$temporary/bin" "$temporary/work"
-
-cat > "$temporary/bin/php" <<'SH'
-#!/bin/sh
-jq -n --args '$ARGS.positional' -- "$@" > "$ARGUMENT_LOG"
-exit "${COMMAND_STATUS:-0}"
-SH
-
-printf '#!/bin/sh\nexit 0\n' > "$temporary/bin/phpize"
-ln -s phpize "$temporary/bin/make"
-ln -s phpize "$temporary/bin/docker-php-ext-enable"
-
-# shellcheck disable=SC2016
-printf '#!/bin/sh\npwd > "$WORKING_DIRECTORY"\n' > "$temporary/work/configure"
-
-chmod +x \
-    "$temporary/bin/php" \
-    "$temporary/bin/phpize" \
-    "$temporary/work/configure"
-
-export PATH="$temporary/bin:$PATH"
-export ARGUMENT_LOG="$temporary/arguments.json"
-export WORKING_DIRECTORY="$temporary/cwd.txt"
-directory="$temporary"
-jobs=1
-
-# Pass the manifest's exact PIE package version and configure options.
-# Skip the seven fixed arguments for the PIE command and installer flags.
-printf 'redis\n' > "$directory/external.txt"
-install_pie
-jq -e --slurpfile manifest "$config" '
-    .[7:] == (
-        $manifest[0].pie_packages.redis |
-        [.package + ":" + .version] + .configure_options
-    )
-' "$ARGUMENT_LOG" > /dev/null
-
-# Install the Protobuf package pin, rather than its different module version.
-printf 'protobuf\n' > "$directory/external.txt"
-install_pie
-jq -e --slurpfile manifest "$config" '
-    .[7:] == [$manifest[0].pie_packages.protobuf.package + ":" +
-        $manifest[0].pie_packages.protobuf.version] and
-    ($manifest[0].pie_packages.protobuf.version != $manifest[0].pie_packages.protobuf.module_version)
-' "$ARGUMENT_LOG" > /dev/null
-printf 'redis\n' > "$directory/external.txt"
-
-# Pass spaces and shell syntax literally as a single command argument.
-# Bypass pin validation in this fixture to exercise argument handling directly.
-# shellcheck disable=SC2016
-literal='spaces; $(printf unexpected)'
-jq --arg literal "$literal" '
-    .pie_packages.redis.configure_options = [$literal]
-' "$config" > "$temporary/literal.json"
-
-config="$temporary/literal.json"
-install_pie
-jq -e --arg literal "$literal" '.[-1] == $literal' "$ARGUMENT_LOG" > /dev/null
-
-# Execute XHProf compilation commands inside the requested source directory.
-compile_xhprof "$temporary/work"
-[ "$(cat "$WORKING_DIRECTORY")" = "$temporary/work" ]
-
-# A failed command must cause installation to fail.
+rejects sh "$root/scripts/build_pie_extension.sh" 'redis;command' phpredis/phpredis 6.3.0 true
+rejects sh "$root/scripts/build_pie_extension.sh" redis bad-package 6.3.0 true
+rejects sh "$root/scripts/build_pie_extension.sh" redis phpredis/phpredis 6.3.0 true '--flag;command'
+rejects sh "$root/scripts/build_pie_extension.sh" redis phpredis/phpredis 6.3.0 maybe
 export COMMAND_STATUS=17
-expect_failure install_pie
-
-echo 'Installer classification, validation, metadata, and command handling passed'
+rejects sh "$root/scripts/build_pie_extension.sh" redis phpredis/phpredis 6.3.0 true
+export COMMAND_STATUS=0 STRIP_STATUS=18
+rejects sh "$root/scripts/build_pie_extension.sh" redis phpredis/phpredis 6.3.0 true
+echo 'PIE pin, argument, selection, stripped artifact, and failure checks passed'
