@@ -4,7 +4,7 @@ This guide covers local builds, dependency updates, and publication. For availab
 
 ## Build and test locally
 
-Run commands from the repository root. Local builds require Docker with Buildx, access to the Docker daemon, `jq`, and network access. The Python checks and image selection tools also require Python 3 and Git history. Only Alpine PHP base images are supported.
+Run commands from the repository root. Builds require Docker, Buildx, and network access. Bake is the supported build entry point. Python checks, selection, and lock refreshes also require the Docker CLI with Buildx: configuration is resolved using `docker buildx bake --print`, which needs neither a running Docker daemon nor registry access.
 
 Run the unit tests:
 
@@ -12,34 +12,36 @@ Run the unit tests:
 python3 -m unittest discover -s tests -v
 ```
 
-Build a PHP 8.4 image using its committed base image and extension pins:
+Build the pinned PHP 8.4 image:
 
 ```sh
-php_manifest=build/php/8.4.json
-extensions=$(jq -r '.extensions' "$php_manifest")
-
-docker buildx build --load --target php --tag docker-php:local \
-  --build-arg PHP_BASE_IMAGE="$(jq -r '.image' "$php_manifest")" \
-  --build-arg EXTENSIONS="$extensions" \
-  --build-arg PACKAGES="$(jq -r '.packages' "$php_manifest")" \
-  .
+docker buildx bake -f docker-bake.hcl -f build/php/8.4.hcl --load php-8-4
 ```
 
-Choose another manifest to build a different PHP minor. To include Node.js, use `--target php-node`; its base image is pinned in the Dockerfile. Custom bases can be supplied through `PHP_BASE_IMAGE` and `NODE_BASE_IMAGE`, and must match the supported PHP, Node, and Alpine versions. Changing `NODE_VERSION` alone does not select a different Node image.
+Use `php-8-4-node24` for its Node variant. Other minor files provide corresponding targets, such as `php-8-5` and `php-8-5-node24`. Always specify both Bake files explicitly so local Compose overrides are not loaded implicitly. Local tags are `docker-php:<variant>`, for example `docker-php:8.4-fpm-alpine`.
 
-Test the resulting image:
+The minor's Bake file owns its enabled extensions, PHP image, package pins, XHProf source, and optional configure arguments. Shared tool images remain pinned in the Dockerfile. Custom local selections can override the Bake `EXTENSIONS` variable; all build switches are derived from that selection:
 
 ```sh
-docker run --rm --entrypoint php -v "$PWD:/work:ro" \
-  docker-php:local /work/tests/test_apk_lock.php
-docker run --rm --entrypoint sh -v "$PWD:/work:ro" \
-  docker-php:local /work/tests/test_installer.sh
-scripts/test_image.sh --image=docker-php:local --extensions="$extensions"
+docker buildx bake -f docker-bake.hcl -f build/php/8.4.hcl \
+  --var 'EXTENSIONS=bcmath redis' --load php-8-4
 ```
 
-For a Node variant, also pass `--node=24` to `scripts/test_image.sh`. The image checks cover disabled extension defaults, independent activation, combined loading, extension functionality, and container user settings. CI also verifies installed versions against the committed pins.
+An empty `--var EXTENSIONS=` builds without additional extensions or Composer. Direct Docker builds require the explicit image, selection switches, and version arguments; the former four-argument Docker build interface is not maintained. The ignored local `compose.override.yaml`, if present, must be updated separately when adopting Bake.
 
-Builds use the host architecture by default. Add `--platform linux/amd64` or `--platform linux/arm64` to select one explicitly; building or running another architecture requires emulation. CI tests both architectures on native runners.
+Test a default build:
+
+```sh
+image=docker-php:8.4-fpm-alpine
+extensions=$(docker image inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^EXTENSIONS=//p')
+docker run --rm --entrypoint php -v "$PWD:/work:ro" "$image" /work/tests/test_apk_lock.php
+docker run --rm --entrypoint sh -v "$PWD:/work:ro" "$image" /work/tests/test_installer.sh
+tests/test_image.sh --image="$image" --extensions="$extensions"
+```
+
+For a Node variant, also pass `--node=24` to the image test. Checks cover disabled defaults, independent activation, combined loading, extension functionality, and container users. CI also verifies installed versions against the resolved pins.
+
+Local builds use the host architecture. Override a target with `--set php-8-4.platform=linux/arm64` when needed; building or running another architecture requires emulation. CI builds and tests `linux/amd64` and `linux/arm64` on native runners.
 
 ### Preview the build matrix
 
@@ -52,9 +54,9 @@ python3 scripts/plan_ci.py --base-ref origin/main --out /tmp/php-build-matrix.js
 python3 scripts/plan_ci.py --purpose publish --base-ref origin/main --out /tmp/php-build-matrix.json
 ```
 
-Each command replaces the output file. Selection needs Git history but does not require Docker or network access. Fetch the comparison reference beforehand if it is unavailable locally. Without a selection option, all variants are included.
+Each command replaces the output file. Selection needs Git history and the Docker CLI with Buildx, but does not require a running Docker daemon or network access. Fetch the comparison reference beforehand if it is unavailable locally. Without a selection option, all variants are included.
 
-`scripts/plan_ci.py` plans image builds and Renovate validation, checks publication supersession, and writes CI outputs. `scripts/image_config.py` loads and validates image configuration independently of Git and shares image metadata definitions with verification. `--purpose test` is the default; `--purpose publish` applies publication exclusions to Git changes. Selection JSON and GitHub outputs include `renovate_changes`, which is true when the diff touches `renovate.json` or the Renovate template. An unavailable reference fails planning; a zero `before` SHA on an initial push selects all variants and Renovate validation. Manual PHP selection behaves the same for both purposes and sets `renovate_changes=false` because no PR diff is evaluated.
+`scripts/plan_ci.py` plans image builds and Renovate validation, checks publication supersession, and writes CI outputs. `scripts/image_config.py` extracts CI metadata and expected versions from resolved Bake targets. Compiler selection belongs to Bake; package inventory validation belongs to `scripts/apk_lock.php` in the build. Image functionality and version checks live under `tests/`. `--purpose test` is the default; `--purpose publish` applies publication exclusions to Git changes. Selection JSON and GitHub outputs include `renovate_changes`, which is true when the diff touches `renovate.json` or the Renovate template. An unavailable reference fails planning; a zero `before` SHA on an initial push selects all variants and Renovate validation. Manual PHP selection behaves the same for both purposes and sets `renovate_changes=false` because no PR diff is evaluated.
 
 ## Update dependencies and extensions
 
@@ -62,22 +64,24 @@ The build inputs live in these files:
 
 | File | Contents |
 | --- | --- |
-| `build/php/<minor>.json` | PHP base image, extension list, PIE package pins and configure options, and XHProf source tag and commit |
+| `build/php/<minor>.hcl` | PHP base image, extension list, PIE version arguments, reported module versions, XHProf tag/commit, and optional configure-option overrides |
 | `build/apk/<release>/<architecture>.json` | Additional runtime packages and their exact versions, including transitive dependencies |
-| `Dockerfile` | PIE, Composer, and Node base image pins |
-| `scripts/alpine_packages.sh` | Build and runtime package profiles used during installation and lock refreshes |
+| `docker-bake.hcl` | Shared build settings, build/runtime package profiles, and derivation of compiler switches |
+| `Dockerfile` | Compiler/runtime recipes and PIE, Composer, and Node image pins |
 
-PHP bases specify an Alpine release and an immutable image digest. Unchanged packages inherited from the base are covered by that digest. Additional runtime packages are checked against the architecture's lockfile after build dependencies are removed. Missing pins, unavailable versions, and unexpected runtime dependencies fail the build.
+PHP bases specify an Alpine release and an immutable image digest. Unchanged packages inherited from the base are covered by that digest. The runtime stage checks its package inventory against the architecture's lockfile before compiler stages are derived from it. Missing pins, unavailable versions, and unexpected runtime dependencies fail the build.
 
-Temporary build tools and development packages use the configured Alpine repositories and are removed after compilation. Their versions are not pinned, so rebuilding the same committed inputs can use newer build tools. Normal builds use the committed extension and runtime package pins without refreshing them.
+Build tools and development packages use the configured Alpine repositories and stay in intermediate stages, outside the final image. Their versions are not pinned, so rebuilding the same committed inputs can use newer build tools. Normal builds use the committed extension and runtime package pins without refreshing them.
 
 ### Add or update an extension
 
-1. Update the extension list and package or source pin in each affected PHP manifest. Bundled extensions use Docker's PHP helpers; external extensions use PIE. XHProf is built from its pinned Git commit.
-2. For PIE packages, set `version` to the exact package release. If the PHP module reports a different version, also set `module_version`; otherwise verification defaults to `version`. Review both values when updating Protobuf, which uses the third-party `extport/protobuf` mirror.
-3. Add any system dependencies to the package profiles and refresh both architecture locks when runtime dependencies change.
-4. Update the README and Compose examples for new extensions, and add a functional check to `scripts/test_image.sh`.
-5. Run the local checks and require successful CI builds on both architectures before publication.
+1. Update `EXTENSIONS` and the relevant `<EXTENSION>_VERSION` argument in each affected minor's Bake file. Bundled extensions use Docker's PHP helpers; PIE packages have independent compiler stages. XHProf uses `XHPROF_TAG` and `XHPROF_COMMIT`.
+2. Package pins are exact releases. When the reported module version differs, set `<EXTENSION>_MODULE_VERSION`; otherwise verification expects the package version. Protobuf currently needs this override for the `extport/protobuf` mirror.
+3. A new external extension needs a Dockerfile compiler stage and artifact copy, plus an entry in Bake's `EXTERNAL_EXTENSIONS`. Keep package names and default configure options in the corresponding recipe. A minor can override `<EXTENSION>_CONFIGURE_OPTIONS` with validated whitespace-separated flags.
+4. Update system package profiles and refresh both architecture locks when runtime dependencies change. Add a functional image test and update the README and Compose examples as needed.
+5. Run the checks and require successful native CI builds on both architectures before publication.
+
+To add a PHP minor, add its HCL file and matching plain/Node targets, its Renovate compatibility rules, the manual workflow choice, and documentation. If an external extension does not support that minor, omit it from `EXTENSIONS` and omit its version pin. Bake derives a false compiler switch; installation is skipped and runtime/version tests do not expect the module. Other minors retain their own pins. Do not suppress a failed installation of an enabled extension. PHP 8.5 and later must not include built-in OPcache in the managed extension list.
 
 All extensions added by this project remain disabled by default. The entrypoint enables them with `PHP_EXTENSION_<NAME>=true` or `1`. Keep the PHP 8.5 built-in OPcache exception when updating extension lists.
 
@@ -90,7 +94,7 @@ python3 scripts/refresh_apk_locks.py --platform linux/amd64
 python3 scripts/refresh_apk_locks.py --platform linux/arm64
 ```
 
-The refresh runs disposable PHP base containers and resolves the runtime package profile, including its dependencies. It requires Docker, network access, and a native runner or emulation for the selected architecture. It does not compile extensions or build the final images.
+The refresh reads the same `RUNTIME_PACKAGES` profile from resolved Bake arguments that the Dockerfile uses, including any additional `PACKAGES`. It runs disposable PHP base containers to resolve these packages and their dependencies. It requires Docker, network access, and a native runner or emulation for the selected architecture. It does not compile extensions or build the final images.
 
 Review and commit both lockfiles, then rebuild and test the affected images. Extra packages requested through the `PACKAGES` build argument must also be covered by the runtime lock.
 
@@ -102,17 +106,27 @@ The hosted Renovate app proposes updates to base images, extension versions, XHP
 
 The PR workflow and automatic publication use explicit `paths-ignore` filters: any changed path that is not ignored triggers the corresponding workflow. Both ignore exactly `docs/**` and the root `README.md` and `LICENSE`. Publication additionally ignores `renovate.json` and `.github/workflows/template-renovate.yml`; the PR workflow deliberately allows those paths so it can validate Renovate updates. A mixed change containing another path still triggers the workflow. New files, scripts, directories, and workflows run by default without needing an inclusion-list update.
 
-When triggered, PRs run the image-related Python unit tests, then the existing selection job computes image selection and a separate `renovate_changes` flag from one Git diff against the target-base commit. Images are tested from the checked-out merge result without publishing. Changes to a PHP-minor manifest select its plain and Node variants; runtime package locks select variants using that Alpine release. Node-only Dockerfile changes select Node variants. Renovate configuration and the Renovate template select no images; every other non-ignored path selects all variants, including new or unrecognized files. New commits cancel superseded runs for the same PR, including called workflows.
+When triggered, PRs run the image-related Python unit tests, then the existing selection job computes image selection and a separate `renovate_changes` flag from one Git diff against the target-base commit. Images are tested from the checked-out merge result without publishing. Changes to a PHP-minor Bake file select its plain and Node variants; runtime package locks select variants using that Alpine release. Node-only Dockerfile changes select Node variants. Renovate configuration and the Renovate template select no images; every other non-ignored path selects all variants, including new or unrecognized files. New commits cancel superseded runs for the same PR, including called workflows.
 
-Automatic publication on `main` additionally ignores `tests/**`, `scripts/test_image.sh`, `scripts/verify_image.py`, `scripts/plan_ci.py`, `scripts/image_config.py`, `scripts/refresh_apk_locks.py`, and `.github/workflows/build-test.yml`. These explicit test/tooling exclusions do not trigger publication or broaden a mixed push's publication selection. For example, a PHP 8.3 manifest change combined with test changes tests all variants in the PR but publishes only the two PHP 8.3 variants. Publication selection covers the entire push, retains PHP-minor, Alpine-release, and Node-only targeting, and selects all variants for every other non-ignored path. Keep the planner's exclusion lists aligned with the workflow filters. Review exclusions if an ignored file becomes an image input.
+Automatic publication on `main` additionally ignores `tests/**`, `scripts/plan_ci.py`, `scripts/image_config.py`, `scripts/refresh_apk_locks.py`, and `.github/workflows/build-test.yml`. These explicit test/tooling exclusions do not trigger publication or broaden a mixed push's publication selection. For example, a PHP 8.3 Bake change combined with test changes tests all variants in the PR but publishes only the two PHP 8.3 variants. Publication selection covers the entire push, retains PHP-minor, Alpine-release, and Node-only targeting, and selects all variants for every other non-ignored path. Keep the planner's exclusion lists aligned with the workflow filters. Review exclusions if an ignored file becomes an image input.
 
 Renovate validation is a separate job within the same PR workflow, calling `.github/workflows/template-renovate.yml` only when `needs.read-matrix.outputs.renovate_changes == 'true'`. The reusable template keeps the version pin inline, installs Node, and runs `renovate-config-validator --strict --no-global renovate.json`. It has only a `workflow_call` trigger and no separate change-detection job or concurrency group. Changes to `renovate.json` or the template select Renovate validation; a validator-only update skips Docker image builds, while mixed image/Renovate changes run both jobs. Additions, deletions, and renames are detected by the existing selector, and Git errors fail selection. The final **Validate build outcome** job checks both jobs, requiring success when selected and an intentional skip otherwise.
 
 Each selected variant calls the reusable workflow independently. Its publication job depends on both architecture builds succeeding; a failed variant does not block other complete variants. Selected variants build and test on both architectures before updating minor and patch tags. Each architecture image is compiled once, tested locally on its CI runner, and transferred to the registry by digest. Candidate source/variant labels and the final tags' architecture digests are verified. A variant changed by a newer publication-relevant commit on `main` is reported as `Superseded`; its older candidate does not update tags. Later test-only or other excluded changes do not supersede publication candidates. Publication runs queue without replacing pending runs.
 
+Image builds import and export [BuildKit's GitHub Actions cache](https://docs.docker.com/build/cache/backends/gha/), with a separate scope for every variant and architecture. Matching layers reuse compiled extensions; changed build inputs invalidate their dependent layers. All image tests and version checks still run on every selected image. Cache export failures do not fail otherwise successful builds. PR jobs load only the Docker image for testing; publication jobs also export the OCI archive used to transfer the tested image by digest.
+
+Each PIE package and XHProf compiles in an independent stage; bundled extensions compile together in one stage. Each stage declares only its own build switch, version, and configure arguments, so a Redis version or configure-option change invalidates only the Redis compiler. XHProf source changes invalidate only XHProf. The final image installs the pinned runtime packages and copies the compiled modules, INI files, and XHProf support files; compiler packages and sources stay in intermediate stages. Composer is copied separately, so Composer updates do not recompile extensions. PIE binary updates invalidate the PIE compiler stages, while PHP base, runtime-lock, or shared package-profile changes can invalidate all compiler stages; PIE-helper changes affect only PIE stages. CI runs one build step at a time to bound compiler memory usage; `mode=max` preserves intermediate compiler caches across runs.
+
+To verify cache isolation with a real builder, run `python3 tests/check_extension_cache.py --builder <builder-name> --logs /tmp/php-extension-cache-checks`. It builds PHP 8.4 by default, then checks warm-cache reuse and isolated Redis, XHProf, and Composer changes in a disposable build context. This requires Docker and network access and can take as long as a full initial build. Use a builder configured with `[worker.oci] max-parallelism = 1` to match CI's compilation concurrency.
+
+The first build or a cache miss still requires compilation. Caches follow GitHub's branch visibility and eviction rules: PRs can read the default branch's caches, while caches written by PR runs are limited to that PR. Publication on `main` warms caches for later PRs. Cached layers also retain the unpinned temporary build tools used during their original compilation.
+
 ### Rebuild or recover images
 
 In GitHub Actions, run **Build & publish PHP images with extensions** from `main`. Choose `All` or a PHP minor; selecting a minor rebuilds its PHP and Node variants on both architectures using current `main`.
+
+Enable **no-cache** to force fresh compilation, for example to pick up newer temporary build tools or diagnose a cached build. This bypasses cached layers and exports the fresh results back to the cache. The default is to reuse matching layers.
 
 Use a fresh manual run to recover failed variants, restore missing tags, or recover from partially updated tags. Failed variants are not automatically retried by unrelated pushes, and there is no scheduled tag repair. Check the workflow summaries for `Published`, `Not selected`, `Superseded`, and `Failed`.
 

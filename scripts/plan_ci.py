@@ -24,8 +24,6 @@ RENOVATE_PATHS = ("renovate.json", ".github/workflows/template-renovate.yml")
 IMAGE_TEST_IGNORED_PATHS = PR_IGNORED_PATHS + RENOVATE_PATHS
 PUBLICATION_IGNORED_PATHS = IMAGE_TEST_IGNORED_PATHS + (
     "tests/**",
-    "scripts/test_image.sh",
-    "scripts/verify_image.py",
     "scripts/plan_ci.py",
     "scripts/image_config.py",
     "scripts/refresh_apk_locks.py",
@@ -139,7 +137,7 @@ def _affected_image_tags(
     for path in changes.paths:
         if any(fnmatchcase(path, pattern) for pattern in ignored):
             continue
-        php_manifest = re.fullmatch(r"build/php/([^/]+)\.json", path)
+        php_manifest = re.fullmatch(r"build/php/([^/]+)\.hcl", path)
         apk_lock = re.fullmatch(r"build/apk/([^/]+)/[^/]+\.json", path)
         matching: Sequence[ImageVariant]
         if php_manifest:

@@ -18,12 +18,17 @@ on:
       source-ref:
         required: true
         type: string
+      no-cache:
+        description: Recompile even when matching build layers are cached
+        default: false
+        type: boolean
 
 defaults:
   run:
     shell: bash
 
 env:
+  BUILDX_BAKE_DISABLE_VARS_ENV_LOOKUP: '1'
   ENTRY: ${{ inputs.variant }}
   IMAGE: ${{ inputs.registry }}/${{ inputs.image }}
   TAG_MINOR: ${{ fromJson(inputs.variant).tagMinor }}
@@ -42,27 +47,29 @@ jobs:
         with:
           ref: ${{ inputs.source-ref }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - name: Build once for local testing and later transfer
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: .
-          platforms: linux/${{ matrix.arch }}
-          target: ${{ fromJson(inputs.variant).node != '' && 'php-node' || 'php' }}
-          no-cache: true
-          provenance: false
-          outputs: |
-            type=docker
-            type=oci,dest=${{ runner.temp }}/image.tar
-          tags: test
-          add-hosts: pecl.php.net:127.0.0.1
-          labels: |
-            io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}
-            org.opencontainers.image.revision=${{ inputs.source-ref }}
-          build-args: |
-            PHP_BASE_IMAGE=${{ fromJson(inputs.variant).php_image }}
-            NODE_BASE_IMAGE=${{ fromJson(inputs.variant).node_image }}
-            EXTENSIONS=${{ fromJson(inputs.variant).extensions }}
-            PACKAGES=${{ fromJson(inputs.variant).packages }}
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+      - name: Build once for local testing and later transfer
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7
+        with:
+          source: .
+          files: |
+            docker-bake.hcl
+            ${{ fromJson(inputs.variant).bake_file }}
+          targets: ${{ fromJson(inputs.variant).bake_target }}
+          allow: ${{ inputs.publish && format('fs.write={0}', runner.temp) || '' }}
+          no-cache: ${{ inputs.no-cache }}
+          set: |
+            *.platform=linux/${{ matrix.arch }}
+            *.tags=test
+            *.output=type=docker
+            ${{ inputs.publish && format('*.output+=type=oci,dest={0}/image.tar', runner.temp) || '' }}
+            *.cache-from=type=gha,version=2,scope=${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }}
+            *.cache-to=type=gha,version=2,scope=${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }},mode=max,ignore-error=true,ghtoken=${{ secrets.GITHUB_TOKEN }},repository=${{ github.repository }}
+            *.labels.io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}
+            *.labels.org.opencontainers.image.revision=${{ inputs.source-ref }}
       - name: Test built image
         env:
           NODE: ${{ fromJson(inputs.variant).node }}
@@ -70,8 +77,8 @@ jobs:
         run: |
           docker run --rm --entrypoint php -v "$PWD:/work:ro" test /work/tests/test_apk_lock.php
           docker run --rm --entrypoint sh -v "$PWD:/work:ro" test /work/tests/test_installer.sh
-          scripts/test_image.sh --node="$NODE" --extensions="$EXTENSIONS" --image=test
-          python3 scripts/verify_image.py --image test --entry "$ENTRY"
+          tests/test_image.sh --node="$NODE" --extensions="$EXTENSIONS" --image=test
+          python3 tests/verify_image.py --image test --entry "$ENTRY"
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         if: inputs.publish
         with:
@@ -134,7 +141,7 @@ jobs:
             digest=$(cat "$RUNNER_TEMP/digests/$arch.digest")
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             docker buildx imagetools inspect "$IMAGE@$digest" --format '{{json .Image}}' |
-              python3 scripts/verify_image.py --metadata --entry "$ENTRY" --platform "linux/$arch"
+              python3 tests/verify_image.py --metadata --entry "$ENTRY" --platform "linux/$arch"
           done
       - name: Check current main
         id: current

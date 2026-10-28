@@ -5,6 +5,9 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from image_config import REVISION_LABEL, VARIANT_LABEL
 
 

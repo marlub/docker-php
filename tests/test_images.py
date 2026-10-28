@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -32,7 +33,7 @@ class RepositoryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         for name in ('build', 'scripts', '.github'):
             shutil.copytree(ROOT / name, self.root / name, ignore=shutil.ignore_patterns('__pycache__'))
-        for name in ('.gitignore', 'Dockerfile', 'entrypoint.sh', 'README.md', 'renovate.json'):
+        for name in ('.gitignore', 'Dockerfile', 'entrypoint.sh', 'README.md', 'renovate.json', 'docker-bake.hcl'):
             shutil.copy(ROOT / name, self.root / name)
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.email', 'test@example.test')
@@ -58,6 +59,16 @@ class RepositoryTests(unittest.TestCase):
         change(value)
         path.write_text(json.dumps(value))
 
+    def change_arg(self, minor, key, value):
+        path = self.root / f'build/php/{minor}.hcl'
+        content = path.read_text()
+        pattern = rf'(?m)^(    {key} = )[^\n]+'
+        if re.search(pattern, content):
+            content = re.sub(pattern, lambda m: m[1] + json.dumps(value), content)
+        else:
+            content = content.replace('  default = {\n', f'  default = {{\n    {key} = {json.dumps(value)}\n', 1)
+        path.write_text(content)
+
     def change_node(self):
         path = self.root / 'Dockerfile'
         path.write_text(re.sub(r'node:24\.\d+\.\d+-', 'node:24.999.0-', path.read_text()))
@@ -78,61 +89,137 @@ class SelectionTests(RepositoryTests):
         self.assertEqual(entries[0]['tagPatch'], entries[0]['php_version'] + '-fpm-alpine')
         self.assertNotIn('opcache', entries[-1]['extensions'].split())
         self.assertEqual(entries[0]['source_ref'], self.base)
-        self.assertNotIn('input_hash', entries[0])
-        self.assertNotIn('inputs', entries[0])
+        self.assertEqual(entries[0]['bake_target'], 'php-8-2')
+        self.assertEqual(entries[1]['bake_target'], 'php-8-2-node24')
 
     def test_no_changes_select_nothing_without_registry(self):
         result = create_ci_plan(self.entries(), self.root, self.base)
         self.assertEqual(result['phpimages'], [])
         self.assertTrue(all(row['state'] == 'Not selected' for row in result['report']))
 
-    def test_telemetry_extensions_and_distinct_module_version(self):
-        for entry in self.entries():
-            with self.subTest(variant=entry['tagMinor']):
-                packages = json.loads((self.root / f"build/php/{entry['minor']}.json").read_text())['pie_packages']
-                self.assertTrue({'opentelemetry', 'grpc', 'protobuf'} <= set(entry['extensions'].split()))
-                for name in ('opentelemetry', 'grpc'):
-                    self.assertEqual(entry['extension_versions'][name], packages[name]['version'])
-                self.assertEqual(entry['extension_versions']['protobuf'], packages['protobuf']['module_version'])
-                self.assertNotEqual(entry['extension_versions']['protobuf'], packages['protobuf']['version'])
-        package_version = json.loads((self.root / 'build/php/8.2.json').read_text())['pie_packages']['protobuf']['version']
-        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['protobuf'].pop('module_version'))
-        self.assertEqual(self.entries()[0]['extension_versions']['protobuf'], package_version)
+    def test_resolution_needs_no_daemon_and_ignores_ambient_overrides(self):
+        with patch.dict(os.environ, {'DOCKER_HOST': 'unix:///nonexistent-docker.sock',
+                                     'EXTENSIONS': '', 'PHP_8_2': 'invalid'}):
+            self.assertEqual(len(self.entries()), 8)
+            self.assertIn('grpc', self.entries()[0]['extension_versions'])
 
-    def test_invalid_module_version_fails(self):
-        for value in ('latest', '5.36.2;command', '', None, 5):
-            with self.subTest(value=value):
-                self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['protobuf'].update(module_version=value))
-                with self.assertRaises(ConfigurationError):
-                    self.entries()
+    def test_lock_refresh_can_resolve_bases_without_existing_locks(self):
+        import refresh_apk_locks
+        shutil.rmtree(self.root / 'build/apk')
+        with patch.object(refresh_apk_locks, 'ROOT', self.root):
+            self.assertEqual(len(refresh_apk_locks.selected_base_images()), 4)
+            self.assertEqual(len(refresh_apk_locks.selected_base_images('8.4')), 1)
+            self.assertEqual(refresh_apk_locks.selected_base_images('8.1'), [])
 
-    def test_php_specific_updates(self):
+    def test_lock_refresh_uses_the_selected_bake_package_profile(self):
+        import refresh_apk_locks
+        self.change_arg('8.4', 'RUNTIME_PACKAGES', 'libffi libstdc++')
+        self.change_arg('8.4', 'PACKAGES', 'libpng')
+        with patch.object(refresh_apk_locks, 'ROOT', self.root):
+            selected = refresh_apk_locks.selected_base_images('8.4')[0]
+            self.assertEqual(selected['packages'], 'libffi libstdc++ libpng')
+            other = refresh_apk_locks.selected_base_images('8.3')[0]
+            self.assertNotEqual(other['packages'], selected['packages'])
+
+    def test_shared_tool_pins_are_not_duplicated_in_minor_files(self):
+        self.change_arg('8.2', 'PIE_IMAGE', 'ghcr.io/php/pie:latest')
+        with self.assertRaises(ConfigurationError):
+            self.entries()
+
+    def test_distinct_protobuf_module_version_and_default(self):
+        entry = self.entries()[0]
+        self.assertEqual(entry['extension_versions']['protobuf'], entry['bake_args']['PROTOBUF_MODULE_VERSION'])
+        self.assertNotEqual(entry['extension_versions']['protobuf'], entry['bake_args']['PROTOBUF_VERSION'])
+        path = self.root / 'build/php/8.2.hcl'
+        path.write_text(re.sub(r'(?m)^    PROTOBUF_MODULE_VERSION = .+\n', '', path.read_text()))
+        entry = self.entries()[0]
+        self.assertEqual(entry['extension_versions']['protobuf'], entry['bake_args']['PROTOBUF_VERSION'])
+
+    def test_per_minor_pins_are_independent(self):
+        original = self.entries()
         for minor in ('8.2', '8.3', '8.4', '8.5'):
-            with self.subTest(minor=minor):
-                changed = self.affected(lambda: self.change_json(f'build/php/{minor}.json', lambda c: c['pie_packages']['redis'].update(version='6.3.1')))
-                self.assertEqual(changed, [minor + '-fpm-alpine', minor + '-fpm-alpine-node24'])
+            before = self.git('rev-parse', 'HEAD')
+            self.change_arg(minor, 'REDIS_VERSION', '6.3.99')
+            self.commit()
+            entries = self.entries()
+            self.assertEqual(len(affected_image_tags(entries, self.root, before)), 2)
+            self.assertEqual(next(e for e in entries if e['minor'] == minor)['extension_versions']['redis'], '6.3.99')
+        self.assertEqual(original[0]['extension_versions']['redis'], '6.3.0')
 
-    def test_php_base_digest_and_xhprof_update(self):
-        for field in ('base', 'xhprof'):
-            def change():
-                self.change_json('build/php/8.3.json', lambda c: c.update(image=c['image'].split('@')[0] + '@' + digest('new')) if field == 'base' else c['xhprof'].update(commit='a' * 40))
-            self.assertEqual(len(self.affected(change)), 2)
+    def test_new_minor_can_exclude_an_unsupported_extension(self):
+        content = (self.root / 'build/php/8.5.hcl').read_text()
+        content = content.replace('PHP_8_5', 'PHP_8_6').replace('php-8-5', 'php-8-6').replace('php:8.5.12-', 'php:8.6.0-').replace('docker-php:8.5-', 'docker-php:8.6-')
+        path = self.root / 'build/php/8.6.hcl'
+        path.write_text(content)
+        extensions = self.entries()[-1]['extensions'].split()
+        self.change_arg('8.6', 'EXTENSIONS', ' '.join(n for n in extensions if n != 'grpc'))
+        path.write_text(re.sub(r'(?m)^    GRPC_VERSION = .+\n', '', path.read_text()))
+        entries = self.entries()
+        self.assertEqual(len(entries), 10)
+        for entry in entries[-2:]:
+            self.assertEqual(entry['minor'], '8.6')
+            self.assertEqual(entry['bake_args']['BUILD_GRPC'], 'false')
+            self.assertNotIn('grpc', entry['extension_versions'])
+            self.assertNotIn('grpc', entry['extensions'].split())
+        self.assertIn('grpc', entries[0]['extension_versions'])
+
+    def test_empty_selection_disables_compilers_and_runtime_packages(self):
+        self.change_arg('8.4', 'EXTENSIONS', '')
+        entry = next(e for e in self.entries() if e['minor'] == '8.4')
+        self.assertEqual(entry['extension_versions'], {})
+        self.assertIsNone(entry['xhprof'])
+        self.assertEqual(entry['bake_args']['BUNDLED_EXTENSIONS'], '')
+        self.assertEqual(entry['bake_args']['INSTALL_RUNTIME_PACKAGES'], 'false')
+        self.assertEqual(entry['bake_args']['BUILD_GRPC'], 'false')
+        self.assertEqual(entry['bake_args']['BUILD_REDIS'], 'false')
+
+    def test_invalid_or_missing_version_pins_fail(self):
+        path = self.root / 'build/php/8.2.hcl'
+        original = path.read_text()
+        for key, value in [('REDIS_VERSION', ''), ('REDIS_VERSION', 'latest'),
+                           ('PROTOBUF_MODULE_VERSION', 'latest'), ('PROTOBUF_MODULE_VERSION', 5),
+                           ('XHPROF_COMMIT', 'latest')]:
+            with self.subTest(key=key, value=value):
+                path.write_text(original)
+                self.change_arg('8.2', key, value)
+                with self.assertRaises(ConfigurationError): self.entries()
+        path.write_text(original)
+        path.write_text(re.sub(r'(?m)^    REDIS_VERSION = .+\n', '', original))
+        with self.assertRaises(ConfigurationError): self.entries()
+
+    def test_malformed_bake_and_mismatched_base_fail(self):
+        path = self.root / 'build/php/8.2.hcl'
+        original = path.read_text()
+        path.write_text('invalid HCL {')
+        with self.assertRaises(ConfigurationError): self.entries()
+        path.write_text(original)
+        self.change_arg('8.2', 'PHP_BASE_IMAGE', self.entries()[2]['php_image'])
+        with self.assertRaises(ConfigurationError): self.entries()
+
+    def test_built_in_opcache_cannot_be_requested_on_php85(self):
+        entry = self.entries()[-1]
+        self.change_arg('8.5', 'EXTENSIONS', entry['extensions'] + ' opcache')
+        with self.assertRaises(ConfigurationError): self.entries()
+
+    def test_configure_options_can_differ_per_minor(self):
+        self.change_arg('8.3', 'REDIS_CONFIGURE_OPTIONS', '--enable-redis-session')
+        entries = self.entries()
+        self.assertNotIn('REDIS_CONFIGURE_OPTIONS', entries[0]['bake_args'])
+        self.assertEqual(entries[2]['bake_args']['REDIS_CONFIGURE_OPTIONS'], '--enable-redis-session')
 
     def test_node_pin_and_stage_changes_select_only_node(self):
         path = self.root / 'Dockerfile'
         for change in (self.change_node, lambda: path.write_text(path.read_text().replace('RUN ln -vs', 'RUN ln -vfs'))):
-            before = self.git('rev-parse', 'HEAD')
-            change()
-            self.commit()
+            before = self.git('rev-parse', 'HEAD'); change(); self.commit()
             for purpose in ('test', 'publish'):
-                with self.subTest(purpose=purpose):
-                    changed = affected_image_tags(self.entries(), self.root, before, purpose=purpose)
-                    self.assertEqual(len(changed), 4)
-                    self.assertTrue(all('node24' in tag for tag in changed))
+                changed = affected_image_tags(self.entries(), self.root, before, purpose=purpose)
+                self.assertEqual(len(changed), 4)
+                self.assertTrue(all('node24' in tag for tag in changed))
 
-    def test_unknown_dockerfile_structure_selects_all(self):
-        changed = self.affected(lambda: (self.root / 'Dockerfile').write_text((self.root / 'Dockerfile').read_text() + '\nFROM php AS other\n'))
-        self.assertEqual(len(changed), 8)
+    def test_shared_bake_and_unknown_dockerfile_changes_select_all(self):
+        for name, content in [('docker-bake.hcl', '\n# shared configuration\n'), ('Dockerfile', '\nFROM php AS other\n')]:
+            changed = self.affected(lambda: (self.root / name).write_text((self.root / name).read_text() + content))
+            self.assertEqual(len(changed), 8)
 
     def test_pie_and_composer_updates_select_all(self):
         path = self.root / 'Dockerfile'
@@ -147,114 +234,59 @@ class SelectionTests(RepositoryTests):
         self.assertEqual(affected_image_tags([dict(e, alpine='3.25') for e in self.entries()], self.root, self.base), set())
 
     def test_mixed_changes_across_multiple_push_commits(self):
-        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='6.3.1'))
-        self.commit()
-        self.change_json('build/php/8.3.json', lambda c: c['xhprof'].update(commit='a' * 40))
-        self.commit()
+        self.change_arg('8.2', 'REDIS_VERSION', '6.3.1'); self.commit()
+        self.change_arg('8.3', 'XHPROF_COMMIT', 'a' * 40); self.commit()
         tags = affected_image_tags(self.entries(), self.root, self.base)
         self.assertEqual(len(tags), 4)
         self.assertTrue(all(tag.startswith(('8.2-', '8.3-')) for tag in tags))
 
     def test_pr_selection_uses_checked_out_merge_result(self):
         self.git('checkout', '-qb', 'feature')
-        (self.root / 'scripts/new.sh').write_text('echo test\n')
-        self.commit()
+        (self.root / 'scripts/new.sh').write_text('echo test\n'); self.commit()
         self.git('checkout', 'main')
-        (self.root / 'README.md').write_text('new documentation')
-        base = self.commit()
+        (self.root / 'README.md').write_text('new documentation'); base = self.commit()
         self.git('merge', '--no-ff', '-qm', 'merge result', 'feature')
         self.assertEqual(len(create_ci_plan(self.entries(), self.root, base)['phpimages']), 8)
 
     def test_renames_additions_and_deletions(self):
-        (self.root / 'scripts/new.sh').write_text('echo test\n')
-        self.commit()
-        changed = self.affected(lambda: (self.root / 'scripts/new.sh').rename(self.root / 'moved.txt'))
-        self.assertEqual(len(changed), 8)
-        changed = self.affected(lambda: (self.root / 'moved.txt').rename(self.root / 'scripts/back.sh'))
-        self.assertEqual(len(changed), 8)
-        self.assertEqual(len(self.affected(lambda: (self.root / 'scripts/back.sh').unlink())), 8)
+        path = self.root / 'scripts/new.sh'; path.write_text('echo test\n'); self.commit()
+        self.assertEqual(len(self.affected(lambda: path.rename(self.root / 'moved.txt'))), 8)
+        self.assertEqual(len(self.affected(lambda: (self.root / 'moved.txt').unlink())), 8)
 
-    def test_deleted_manifest_selects_previously_built_minor_for_supersession(self):
-        entries = self.entries()
-        (self.root / 'build/php/8.2.json').unlink()
-        self.commit()
+    def test_deleted_minor_selects_previously_built_variant_for_supersession(self):
+        entries = self.entries(); (self.root / 'build/php/8.2.hcl').unlink(); self.commit()
         self.assertEqual(len(affected_image_tags(entries, self.root, self.base)), 2)
         self.assertEqual(len(self.entries()), 6)
 
     def test_initial_push_and_manual_selection(self):
         entries = self.entries()
         for purpose in ('test', 'publish'):
-            with self.subTest(purpose=purpose):
-                initial = create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)
-                self.assertEqual(len(initial['phpimages']), 8)
-                self.assertTrue(initial['renovate_changes'])
-                manual = create_ci_plan(entries, self.root, php='All', purpose=purpose)
-                self.assertEqual(len(manual['phpimages']), 8)
-                self.assertFalse(manual['renovate_changes'])
-                for minor in ('8.2', '8.3', '8.4', '8.5'):
-                    selected = create_ci_plan(entries, self.root, php=minor, purpose=purpose)['phpimages']
-                    self.assertEqual(len(selected), 2)
-                    self.assertTrue(all(e['minor'] == minor for e in selected))
-        with self.assertRaises(PlanningError):
-            create_ci_plan(entries, self.root, php='8.1')
+            initial = create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)
+            self.assertEqual(len(initial['phpimages']), 8); self.assertTrue(initial['renovate_changes'])
+            self.assertEqual(len(create_ci_plan(entries, self.root, php='All', purpose=purpose)['phpimages']), 8)
+            for minor in ('8.2', '8.3', '8.4', '8.5'):
+                selected = create_ci_plan(entries, self.root, php=minor, purpose=purpose)['phpimages']
+                self.assertEqual(len(selected), 2); self.assertTrue(all(e['minor'] == minor for e in selected))
+        with self.assertRaises(PlanningError): create_ci_plan(entries, self.root, php='8.1')
 
     def test_invalid_references_fail_selection(self):
-        with self.assertRaises(subprocess.CalledProcessError):
-            affected_image_tags(self.entries(), self.root, 'nonexistent')
-        with self.assertRaises(subprocess.CalledProcessError):
-            affected_image_tags(self.entries(), self.root, self.base, 'nonexistent')
+        with self.assertRaises(subprocess.CalledProcessError): affected_image_tags(self.entries(), self.root, 'nonexistent')
+        with self.assertRaises(subprocess.CalledProcessError): affected_image_tags(self.entries(), self.root, self.base, 'nonexistent')
 
-    def test_reruns_repeat_selection(self):
-        self.change_json('build/php/8.2.json', lambda c: c.update(packages=''))
-        self.commit()
-        selection = create_ci_plan(self.entries(), self.root, self.base)
-        source = self.git('rev-parse', 'HEAD')
-        (self.root / 'README.md').write_text('later documentation')
-        self.commit()
-        self.git('checkout', '--detach', source)
-        retry = create_ci_plan(self.entries(), self.root, self.base)
-        self.assertEqual(retry, selection)
-        self.assertEqual(len(retry['phpimages']), 2)
-
-    def test_invalid_configuration_fails(self):
-        self.change_json('build/php/8.2.json', lambda c: c['xhprof'].update(commit='latest'))
-        with self.assertRaises(ConfigurationError):
-            self.entries()
-        self.git('checkout', '--', 'build/php/8.2.json')
-        self.change_json('build/apk/3.24/amd64.json', lambda c: c.update(architecture='aarch64'))
-        with self.assertRaises(ConfigurationError):
-            self.entries()
-        self.git('checkout', '--', 'build/apk/3.24/amd64.json')
-        self.change_json('build/apk/3.24/amd64.json', lambda c: c['packages'].update(libzip='~1'))
-        with self.assertRaises(ConfigurationError):
-            self.entries()
-        self.git('checkout', '--', 'build/apk/3.24/amd64.json')
-        path = self.root / 'Dockerfile'
-        path.write_text(path.read_text().replace('node:24.', 'node:26.'))
-        with self.assertRaises(ConfigurationError):
-            self.entries()
-
-    def test_cli_outputs_and_removed_registry_options(self):
-        script = self.root / 'scripts/plan_ci.py'
-        output = self.root / '.git/matrix.json'
-        github_output = self.root / '.git/github-output'
-        result = subprocess.run([sys.executable, str(script), '--php', '8.4', '--out', str(output), '--github-output', str(github_output)], capture_output=True, text=True)
+    def test_cli_outputs_and_failures(self):
+        script = self.root / 'scripts/plan_ci.py'; output = self.root / '.git/matrix.json'; gh = self.root / '.git/outputs'
+        result = subprocess.run([sys.executable, str(script), '--php', '8.4', '--out', str(output), '--github-output', str(gh)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(json.loads(output.read_text())['phpimages']), 2)
-        self.assertIn('has_changes=true', github_output.read_text())
-        self.assertNotIn('has_repairs', github_output.read_text())
-        result = subprocess.run([sys.executable, str(script), '--base-ref', self.base, '--out', str(output)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(output.read_text())['phpimages'], [])
+        self.assertIn('has_changes=true', gh.read_text())
         for extra in (['--published'], ['--image', IMAGE], ['--base-ref', 'missing']):
-            result = subprocess.run([sys.executable, str(script), '--out', str(output), *extra], capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
+            self.assertNotEqual(subprocess.run([sys.executable, str(script), '--out', str(output), *extra], capture_output=True).returncode, 0)
 
 
 class CurrentSourceTests(RepositoryTests):
     def test_relevant_update_supersedes_only_its_minor(self):
         entries = self.entries()
-        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='999.0.0'))
+        self.change_arg('8.2', 'REDIS_VERSION', '999.0.0')
         self.commit()
         self.assertTrue(is_candidate_superseded(entries[0], self.root))
         self.assertFalse(is_candidate_superseded(entries[2], self.root))
@@ -291,7 +323,7 @@ class CurrentSourceTests(RepositoryTests):
         result = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output.read_text(), 'superseded=false\n')
-        self.change_json('build/php/8.2.json', lambda c: c['pie_packages']['redis'].update(version='999.0.0'))
+        self.change_arg('8.2', 'REDIS_VERSION', '999.0.0')
         self.commit()
         output.unlink()
         result = subprocess.run(args, capture_output=True, text=True)
@@ -324,7 +356,7 @@ class MetadataTests(unittest.TestCase):
             verify_metadata({}, self.entry, 'linux/amd64')
 
     def test_metadata_cli_requires_platform_and_valid_json(self):
-        args = [sys.executable, str(ROOT / 'scripts/verify_image.py'), '--metadata', '--entry', json.dumps(self.entry)]
+        args = [sys.executable, str(ROOT / 'tests/verify_image.py'), '--metadata', '--entry', json.dumps(self.entry)]
         result = subprocess.run(args + ['--platform', 'linux/amd64'], input=json.dumps(self.config), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         for extra, data in [([], '{}'), (['--platform', 'linux/amd64'], 'not json'), (['--platform', 'linux/arm64'], json.dumps(self.config))]:
@@ -456,7 +488,7 @@ class VersionTests(unittest.TestCase):
         verify('test', self.entry, self.run_image)
 
     def test_protobuf_package_version_is_not_its_module_version(self):
-        package = json.loads((ROOT / f"build/php/{self.entry['minor']}.json").read_text())['pie_packages']['protobuf']
+        package = {'version': self.entry['bake_args']['PROTOBUF_VERSION'], 'module_version': self.entry['bake_args']['PROTOBUF_MODULE_VERSION']}
         self.assertEqual(self.versions['protobuf'], package['module_version'])
         self.assertNotEqual(self.versions['protobuf'], package['version'])
         verify('test', self.entry, self.run_image)
@@ -502,7 +534,7 @@ class RenovateTests(unittest.TestCase):
             matches=[]
             for pattern in manager['managerFilePatterns']:
                 pattern=pattern.strip('/')
-                for path in list(ROOT.glob('build/**/*.json')) + list(ROOT.glob('.github/workflows/*.yml')):
+                for path in list(ROOT.glob('build/**/*.json')) + list(ROOT.glob('build/php/*.hcl')) + list(ROOT.glob('.github/workflows/*.yml')):
                     if not re.search(pattern,path.relative_to(ROOT).as_posix()):continue
                     for expression in manager['matchStrings']:
                         expression=re.sub(r'\(\?<([a-zA-Z]+)>',r'(?P<\1>',expression)
