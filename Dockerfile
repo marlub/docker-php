@@ -132,7 +132,9 @@ RUN set -efu; \
             '{tag: $tag, commit: $commit, version: $version}' > /out/usr/local/lib/php/xhprof-build.json; \
         phpize; ./configure --with-php-config=/usr/local/bin/php-config $XHPROF_CONFIGURE_OPTIONS; \
         jobs=$(getconf _NPROCESSORS_ONLN); [ "$jobs" -le 8 ] || jobs=8; \
-        make "-j$jobs"; make install; docker-php-ext-enable xhprof; \
+        make "-j$jobs"; make install; \
+        strip --strip-unneeded "$(php-config --extension-dir)/xhprof.so"; \
+        docker-php-ext-enable xhprof; \
         cp "$(php-config --extension-dir)/xhprof.so" "$destination/"; \
         cp /usr/local/etc/php/conf.d/docker-php-ext-xhprof.ini /out/usr/local/etc/php/conf.d/; \
         cp -a /tmp/xhprof/xhprof_lib /tmp/xhprof/xhprof_html /out/usr/local/lib/php/; \

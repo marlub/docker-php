@@ -28,6 +28,9 @@ jobs=$(getconf _NPROCESSORS_ONLN)
 export XDG_CONFIG_HOME=/tmp/pie-config XDG_CACHE_HOME=/tmp/pie-cache
 if php /tmp/pie.phar --no-interaction --no-ansi install --no-cache \
     --skip-enable-extension "--make-parallel-jobs=$jobs" "$package:$version" "$@"; then
+    module="$(php-config --extension-dir)/$extension.so"
+    # Strip before copying so the compiler cache and runtime both stay small.
+    strip --strip-unneeded "$module"
     docker-php-ext-enable "$extension"
 else
     set +f
@@ -36,6 +39,6 @@ else
     done
     exit 1
 fi
-cp "$(php-config --extension-dir)/$extension.so" "$destination/"
+cp "$module" "$destination/"
 cp "${PHP_INI_DIR:-/usr/local/etc/php}/conf.d/docker-php-ext-$extension.ini" "$DESTDIR/usr/local/etc/php/conf.d/"
 rm -rf /tmp/pie-config /tmp/pie-cache /root/.cache /root/.config/pie

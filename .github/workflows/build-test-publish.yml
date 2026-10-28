@@ -25,6 +25,7 @@ on:
       - scripts/image_config.py
       - scripts/refresh_apk_locks.py
       - .github/workflows/build-test.yml
+      - .github/workflows/cache-cleanup.yml
 
 permissions:
   contents: read

@@ -21,7 +21,9 @@ INITIAL_PUSH_SHA = "0" * 40
 # Patterns are exact root-relative paths or directory/**.
 PR_IGNORED_PATHS = ("docs/**", "README.md", "LICENSE")
 RENOVATE_PATHS = ("renovate.json", ".github/workflows/template-renovate.yml")
-IMAGE_TEST_IGNORED_PATHS = PR_IGNORED_PATHS + RENOVATE_PATHS
+IMAGE_TEST_IGNORED_PATHS = PR_IGNORED_PATHS + RENOVATE_PATHS + (
+    ".github/workflows/cache-cleanup.yml",
+)
 PUBLICATION_IGNORED_PATHS = IMAGE_TEST_IGNORED_PATHS + (
     "tests/**",
     "scripts/plan_ci.py",
