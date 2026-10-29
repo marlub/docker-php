@@ -11,7 +11,7 @@
   "ignoreUnstable": true,
   "pinDigests": true,
   "automerge": false,
-  "platformAutomerge": false,
+  "platformAutomerge": true,
   "rebaseWhen": "behind-base-branch",
   "packageRules": [
     {
