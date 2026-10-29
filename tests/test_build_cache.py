@@ -1,10 +1,11 @@
-import os
 import json
 from pathlib import Path
 import subprocess
-import tempfile
-import textwrap
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
+from build_group import cache_policy
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -13,22 +14,14 @@ CACHE = 'ghcr.io/marlub/php-buildcache'
 
 class CacheRoutingTests(unittest.TestCase):
     def configure(self, **overrides):
-        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
-        step = workflow.split('      - name: Configure build cache\n', 1)[1].split('\n      - ', 1)[0]
-        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
-        env = dict(os.environ, CACHE_IMAGE=CACHE, TAG_MINOR='8.4-fpm-alpine', ARCH='amd64',
+        env = dict(CACHE_IMAGE=CACHE, TAG_MINOR='8.4-fpm-alpine', ARCH='amd64',
                    PUBLISH='false', EVENT_NAME='pull_request', REF='refs/pull/42/merge',
                    ACTOR='renovate[bot]', REPOSITORY='marlub/docker-php',
-                   PR_HEAD_REPOSITORY='marlub/docker-php', PR_NUMBER='42', MERGED_PRS='[]')
+                   PR_HEAD_REPOSITORY='marlub/docker-php', PR_NUMBER='42', MERGED_PRS='[]', NO_CACHE='false')
         env.update(overrides)
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / 'output'
-            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', script],
-                                    env=dict(env, GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(Path(temporary) / 'summary')),
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            header, settings = output.read_text().split('set<<CACHE_SETTINGS\n', 1)
-        return dict(line.split('=', 1) for line in header.splitlines()), settings.removesuffix('CACHE_SETTINGS\n').splitlines()
+        policy = cache_policy(env['CACHE_IMAGE'], env['PUBLISH'] == 'true', env, env['MERGED_PRS'])
+        return ({'registry': policy.registry, 'write': str(bool(policy.scope)).lower()},
+                policy.settings(env['TAG_MINOR'], env['ARCH'], no_cache=env['NO_CACHE'] == 'true'))
 
     def test_same_repository_pr_reads_main_and_own_cache_and_writes_only_own(self):
         output, settings = self.configure()
@@ -105,6 +98,16 @@ class CacheRoutingTests(unittest.TestCase):
         output, settings = self.configure(CACHE_IMAGE='example.test/team/cache')
         self.assertEqual(output['registry'], 'example.test')
         self.assertTrue(all('example.test/team/cache:' in line for line in settings))
+
+    def test_forced_rebuilds_disable_all_imports_but_preserve_exports(self):
+        for tag in ('8.4-fpm-alpine', '8.4-fpm-alpine-node24'):
+            for arch in ('amd64', 'arm64'):
+                for event in ({}, {'PUBLISH': 'true', 'EVENT_NAME': 'push', 'REF': 'refs/heads/main'},
+                              {'PR_HEAD_REPOSITORY': 'contributor/docker-php'}, {'ACTOR': 'dependabot[bot]'}):
+                    with self.subTest(tag=tag, arch=arch, event=event):
+                        _, regular = self.configure(TAG_MINOR=tag, ARCH=arch, MERGED_PRS='[42,43]', **event)
+                        _, forced = self.configure(TAG_MINOR=tag, ARCH=arch, NO_CACHE='true', MERGED_PRS='[42,43]', **event)
+                        self.assertEqual(forced, [line for line in regular if '.cache-to=' in line])
 
     def test_bake_resolves_registry_settings_with_both_image_outputs_and_no_cache(self):
         for arch in ('amd64', 'arm64'):

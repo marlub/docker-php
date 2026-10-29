@@ -148,7 +148,7 @@ class SelectionTests(RepositoryTests):
 
     def test_new_minor_can_exclude_an_unsupported_extension(self):
         content = (self.root / 'build/php/8.5.hcl').read_text()
-        content = content.replace('PHP_8_5', 'PHP_8_6').replace('php-8-5', 'php-8-6').replace('php:8.5.12-', 'php:8.6.0-').replace('docker-php:8.5-', 'docker-php:8.6-')
+        content = content.replace('PHP_8_5', 'PHP_8_6').replace('php-8-5', 'php-8-6').replace('ci-8-5', 'ci-8-6').replace('php:8.5.12-', 'php:8.6.0-').replace('docker-php:8.5-', 'docker-php:8.6-')
         path = self.root / 'build/php/8.6.hcl'
         path.write_text(content)
         extensions = self.entries()[-1]['extensions'].split()
@@ -231,7 +231,7 @@ class SelectionTests(RepositoryTests):
         for arch in ('amd64', 'arm64'):
             changed = self.affected(lambda: self.change_json(f'build/apk/3.24/{arch}.json', lambda c: c['packages'].update({'libzip': '1.11.4-r99'})))
             self.assertEqual(len(changed), 8)
-        self.assertEqual(affected_image_tags([dict(e, alpine='3.25') for e in self.entries()], self.root, self.base), set())
+        self.assertEqual(affected_image_tags([dict(e, distribution_release='3.25') for e in self.entries()], self.root, self.base), set())
 
     def test_mixed_changes_across_multiple_push_commits(self):
         self.change_arg('8.2', 'REDIS_VERSION', '6.3.1'); self.commit()
@@ -542,7 +542,7 @@ class RenovateTests(unittest.TestCase):
             counts.append(len(matches))
         self.assertEqual(counts[:3],[4,28,4])
         self.assertEqual(counts[3:5], [len(json.loads((ROOT/f'build/apk/3.24/{arch}.json').read_text())['packages']) for arch in ('amd64','arm64')])
-        self.assertEqual(counts[5:], [1, 1])
+        self.assertEqual(counts[5:], [1, 1, 0])
 
     def test_revision_aware_architecture_specific_lookup(self):
         config=json.loads((ROOT/'renovate.json').read_text())

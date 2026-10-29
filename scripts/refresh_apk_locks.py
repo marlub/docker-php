@@ -6,20 +6,22 @@ import json
 from pathlib import Path
 import subprocess
 import tarfile
-from image_config import resolve_bake
+from image_config import load_image_variants
 
 ROOT = Path(__file__).resolve().parent.parent
 
 def selected_base_images(php=None):
     # Refresh must work even when locks are missing or need replacement.
-    targets = resolve_bake(ROOT)
+    variants = load_image_variants(ROOT, source_ref="")
     entries = []
-    for path in sorted((ROOT / 'build/php').glob('*.hcl')):
-        if php is not None and path.stem != php:
+    for variant in variants:
+        if variant["node"] or variant["distribution"] != "alpine":
             continue
-        args = targets['php-' + path.stem.replace('.', '-')]['args']
-        entries.append({'image': args['PHP_BASE_IMAGE'],
-                        'packages': ' '.join(filter(None, [args['RUNTIME_PACKAGES'], args.get('PACKAGES')]))})
+        if php is not None and variant["minor"] != php:
+            continue
+        args = variant["bake_args"]
+        entries.append({"image": variant["php_image"],
+                        "packages": " ".join(filter(None, [args["RUNTIME_PACKAGES"], args.get("PACKAGES")]))})
     return entries
 
 def refresh(platform, entries):

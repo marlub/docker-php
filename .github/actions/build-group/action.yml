@@ -1,0 +1,87 @@
+name: Build and test a PHP base family
+description: Build selected plain PHP and Node variants sequentially on one builder
+inputs:
+  variants:
+    required: true
+    description: JSON array of selected variants from one base family
+  builder:
+    required: true
+    description: Shared Buildx builder name
+  arch:
+    required: true
+    description: Native target architecture
+  source-ref:
+    required: true
+    description: Pinned source commit
+  publish:
+    default: 'false'
+    description: Transfer the tested candidate for publication
+  registry:
+    required: true
+    description: Publication registry
+  image:
+    required: true
+    description: Publication image name
+  cache-image:
+    required: true
+    description: Registry image used only for build caches
+  merged-prs:
+    default: '[]'
+    description: Trusted merged PR cache sources
+  no-cache:
+    default: 'false'
+    description: Force fresh compilation, disabling all remote cache imports
+  token:
+    required: true
+    description: Workflow token for eligible registry writes
+runs:
+  using: composite
+  steps:
+    - name: Prepare build group and cache policy
+      id: prepare
+      shell: bash
+      env:
+        VARIANTS: ${{ inputs.variants }}
+        BUILDER: ${{ inputs.builder }}
+        ARCH: ${{ inputs.arch }}
+        SOURCE_REF: ${{ inputs.source-ref }}
+        PUBLISH: ${{ inputs.publish }}
+        IMAGE: ${{ inputs.registry }}/${{ inputs.image }}
+        NO_CACHE: ${{ inputs.no-cache }}
+        CACHE_IMAGE: ${{ inputs.cache-image }}
+        MERGED_PRS: ${{ inputs.merged-prs }}
+        EVENT_NAME: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+        ACTOR: ${{ github.actor }}
+        REPOSITORY: ${{ github.repository }}
+        PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: python3 scripts/build_group.py prepare
+    - name: Log in to cache registry
+      if: steps.prepare.outputs.write == 'true'
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+      with:
+        registry: ${{ steps.prepare.outputs.registry }}
+        username: ${{ github.actor }}
+        password: ${{ inputs.token }}
+    - name: Log in to publication registry
+      if: inputs.publish == 'true' && (steps.prepare.outputs.write != 'true' || steps.prepare.outputs.registry != inputs.registry)
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ github.actor }}
+        password: ${{ inputs.token }}
+    - name: Build selected variants
+      shell: bash
+      env:
+        REQUEST: ${{ steps.prepare.outputs.request }}
+      run: python3 scripts/build_group.py run --request "$REQUEST"
+    - name: Upload independent variant results
+      if: ${{ !cancelled() && inputs.publish == 'true' && steps.prepare.outcome == 'success' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: build-results-${{ steps.prepare.outputs.id }}-${{ inputs.arch }}-attempt-${{ github.run_attempt }}
+        path: ${{ steps.prepare.outputs.directory }}/results.json
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 1

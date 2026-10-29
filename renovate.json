@@ -121,7 +121,10 @@
       "matchPackageNames": [
         "node"
       ],
-      "allowedVersions": "/^24\\./"
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
     },
     {
       "matchDatasources": [
@@ -212,6 +215,17 @@
       "depNameTemplate": "regclient/regclient",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/php\\/8\\.\\d+\\.hcl$/"
+      ],
+      "matchStrings": [
+        "NODE_BASE_IMAGE\\s*=\\s*\"(?<depName>node):(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
     }
   ]
 }

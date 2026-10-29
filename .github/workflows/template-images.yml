@@ -1,4 +1,4 @@
-name: Build, test, and publish one variant
+name: Build, test, and publish a PHP base family
 
 on:
   workflow_call:
@@ -20,7 +20,7 @@ on:
         description: JSON array of trusted merged PR numbers to import on main
         default: '[]'
         type: string
-      variant:
+      variants:
         required: true
         type: string
       source-ref:
@@ -37,14 +37,11 @@ defaults:
 
 env:
   BUILDX_BAKE_DISABLE_VARS_ENV_LOOKUP: '1'
-  ENTRY: ${{ inputs.variant }}
   IMAGE: ${{ inputs.registry }}/${{ inputs.image }}
-  TAG_MINOR: ${{ fromJson(inputs.variant).tagMinor }}
-  TAG_PATCH: ${{ fromJson(inputs.variant).tagPatch }}
 
 jobs:
   build-and-test:
-    name: ${{ fromJson(inputs.variant).tagMinor }} (${{ matrix.arch }})
+    name: ${{ fromJson(inputs.variants)[0].base_target }} (${{ matrix.arch }})
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false
@@ -54,143 +51,44 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.source-ref }}
-      - name: Configure build cache
-        id: cache
-        env:
-          CACHE_IMAGE: ${{ inputs.cache-image }}
-          ARCH: ${{ matrix.arch }}
-          PUBLISH: ${{ inputs.publish }}
-          EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          ACTOR: ${{ github.actor }}
-          REPOSITORY: ${{ github.repository }}
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          MERGED_PRS: ${{ inputs.merged-prs }}
-        run: |
-          main_ref="$CACHE_IMAGE:main-$TAG_MINOR-$ARCH"
-          write_ref=''
-          merged_numbers=()
-          if [ "$ACTOR" != 'dependabot[bot]' ]; then
-            if [ "$PUBLISH" = true ] && [ "$REF" = refs/heads/main ] &&
-               { [ "$EVENT_NAME" = push ] || [ "$EVENT_NAME" = workflow_dispatch ]; }; then
-              write_ref="$main_ref"
-              if ! merged_prs=$(jq -cse '
-                if length == 1 and (.[0] | type == "array" and all(.[];
-                  type == "number" and . > 0 and . == floor and . <= 9007199254740991))
-                then .[0] | unique else error("Expected an array of positive PR numbers") end
-              ' <<< "$MERGED_PRS"); then
-                echo '::warning::Invalid merged PR cache input; using main cache only'
-                merged_prs='[]'
-              fi
-              mapfile -t merged_numbers < <(jq -r '.[]' <<< "$merged_prs")
-            elif [ "$PUBLISH" = false ] && [ "$EVENT_NAME" = pull_request ] &&
-                 [ "$PR_HEAD_REPOSITORY" = "$REPOSITORY" ]; then
-              [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-              write_ref="$CACHE_IMAGE:pr-$PR_NUMBER-$TAG_MINOR-$ARCH"
-            fi
-          fi
-          {
-            echo "registry=${CACHE_IMAGE%%/*}"
-            echo "write=$([ -n "$write_ref" ] && echo true || echo false)"
-            echo 'set<<CACHE_SETTINGS'
-            echo "*.cache-from=type=registry,ref=$main_ref"
-            for number in "${merged_numbers[@]}"; do
-              echo "*.cache-from+=type=registry,ref=$CACHE_IMAGE:pr-$number-$TAG_MINOR-$ARCH"
-            done
-            if [ -n "$write_ref" ]; then
-              if [ "$write_ref" != "$main_ref" ]; then
-                echo "*.cache-from+=type=registry,ref=$write_ref"
-              fi
-              echo "*.cache-to=type=registry,ref=$write_ref,mode=max,ignore-error=true"
-            fi
-            echo CACHE_SETTINGS
-          } >> "$GITHUB_OUTPUT"
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            {
-              printf '### Build cache sources (%s, %s)\n\n' "$TAG_MINOR" "$ARCH"
-              printf -- '- %s\n' "$main_ref"
-              for number in "${merged_numbers[@]}"; do
-                printf -- '- %s:pr-%s-%s-%s\n' "$CACHE_IMAGE" "$number" "$TAG_MINOR" "$ARCH"
-              done
-              if [ -n "$write_ref" ] && [ "$write_ref" != "$main_ref" ]; then
-                printf -- '- %s\n' "$write_ref"
-              fi
-              printf '\nCache export: %s\n\n' "${write_ref:-disabled}"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Log in to cache registry
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
-        if: steps.cache.outputs.write == 'true'
-        with:
-          registry: ${{ steps.cache.outputs.registry }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # A new builder per job keeps forced builds isolated from older compiler records.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        id: builder
         with:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
-      - name: Build once for local testing and later transfer
-        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7
-        with:
-          source: .
-          files: |
-            docker-bake.hcl
-            ${{ fromJson(inputs.variant).bake_file }}
-          targets: ${{ fromJson(inputs.variant).bake_target }}
-          allow: ${{ inputs.publish && format('fs.write={0}', runner.temp) || '' }}
-          no-cache: ${{ inputs.no-cache }}
-          set: |
-            *.platform=linux/${{ matrix.arch }}
-            *.tags=test
-            *.output=type=docker
-            ${{ inputs.publish && format('*.output+=type=oci,dest={0}/image.tar', runner.temp) || '' }}
-            ${{ steps.cache.outputs.set }}
-            *.labels.io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}
-            *.labels.org.opencontainers.image.revision=${{ inputs.source-ref }}
-      - name: Test built image
-        env:
-          NODE: ${{ fromJson(inputs.variant).node }}
-          EXTENSIONS: ${{ fromJson(inputs.variant).extensions }}
-        run: |
-          docker run --rm --entrypoint php -v "$PWD:/work:ro" test /work/tests/test_apk_lock.php
-          docker run --rm --entrypoint sh -v "$PWD:/work:ro" test /work/tests/test_installer.sh
-          tests/test_image.sh --node="$NODE" --extensions="$EXTENSIONS" --image=test
-          python3 tests/verify_image.py --image test --entry "$ENTRY"
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
-        if: inputs.publish
-        with:
-          registry: ${{ inputs.registry }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main
         if: inputs.publish
         with:
           release: v0.11.7
-      - name: Upload the tested image by digest
-        if: inputs.publish
-        run: |
-          mkdir -p "$RUNNER_TEMP/oci"
-          tar -xf "$RUNNER_TEMP/image.tar" -C "$RUNNER_TEMP/oci"
-          digest=$(jq -er '.manifests | if length == 1 then .[0].digest else error("Ambiguous candidate") end' "$RUNNER_TEMP/oci/index.json")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          config=$(jq -er '.config.digest' "$RUNNER_TEMP/oci/blobs/sha256/${digest#sha256:}")
-          test "$config" = "$(docker image inspect test --format '{{.Id}}')"
-          regctl image copy "ocidir://$RUNNER_TEMP/oci@$digest" "$IMAGE@$digest"
-          printf '%s\n' "$digest" > "$RUNNER_TEMP/${{ matrix.arch }}.digest"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: inputs.publish
+      - name: Build and test selected family variants
+        uses: ./.github/actions/build-group
         with:
-          name: digests-${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/${{ matrix.arch }}.digest
-          overwrite: true
-          retention-days: 1
+          variants: ${{ inputs.variants }}
+          builder: ${{ steps.builder.outputs.name }}
+          arch: ${{ matrix.arch }}
+          source-ref: ${{ inputs.source-ref }}
+          publish: ${{ inputs.publish }}
+          registry: ${{ inputs.registry }}
+          image: ${{ inputs.image }}
+          cache-image: ${{ inputs.cache-image }}
+          merged-prs: ${{ inputs.merged-prs }}
+          no-cache: ${{ inputs.no-cache }}
+          token: ${{ github.token }}
 
   publish:
-    name: Publish ${{ fromJson(inputs.variant).tagMinor }}
+    name: Publish ${{ matrix.variant.tagMinor }}
     needs: build-and-test
-    if: inputs.publish
+    if: ${{ !cancelled() && inputs.publish }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(inputs.variants) }}
+    env:
+      ENTRY: ${{ toJson(matrix.variant) }}
+      TAG_MINOR: ${{ matrix.variant.tagMinor }}
+      TAG_PATCH: ${{ matrix.variant.tagPatch }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -202,18 +100,24 @@ jobs:
           python-version: '3.11'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: digests-${{ fromJson(inputs.variant).tagMinor }}-amd64
-          path: ${{ runner.temp }}/digests
+          name: build-results-${{ matrix.variant.base_target }}-amd64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-results/amd64
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: digests-${{ fromJson(inputs.variant).tagMinor }}-arm64
-          path: ${{ runner.temp }}/digests
+          name: build-results-${{ matrix.variant.base_target }}-arm64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-results/arm64
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ${{ inputs.registry }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Require successful candidates from this attempt
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 scripts/build_group.py extract --entry "$ENTRY" --attempt "$ATTEMPT" \
+            --bundles "$RUNNER_TEMP/build-results" --out "$RUNNER_TEMP/digests"
       - name: Verify candidate metadata
         run: |
           for arch in amd64 arm64; do
