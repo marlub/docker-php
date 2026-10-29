@@ -50,7 +50,7 @@ jobs:
     uses: ./.github/workflows/template-renovate.yml
 
   build-and-test:
-    name: ${{ matrix.phpimage.tagMinor }}
+    name: ${{ matrix.phpgroup.id }}
     permissions:
       contents: read
       packages: write
@@ -59,14 +59,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        phpimage: ${{ fromJson(needs.read-matrix.outputs.matrix).phpimages }}
+        phpgroup: ${{ fromJson(needs.read-matrix.outputs.matrix).buildgroups }}
     uses: ./.github/workflows/template-images.yml
     with:
       publish: false
       registry: ''
       image: ''
       cache-image: ghcr.io/marlub/php-buildcache
-      variant: ${{ toJson(matrix.phpimage) }}
+      variants: ${{ toJson(matrix.phpgroup.variants) }}
       source-ref: ${{ needs.read-matrix.outputs.source_ref }}
 
   validate-build-and-test:

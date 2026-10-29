@@ -91,6 +91,16 @@ class RegistryCleanupTests(unittest.TestCase):
         api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'])], states={42: 'open'})
         self.assertEqual(self.run_cleanup(api, pr_number=42), [])
 
+    def test_distribution_releases_and_additional_node_majors_use_existing_cleanup_policy(self):
+        api = FakeAPI([
+            version(1, ['pr-42-8.4-fpm-bookworm-node26-amd64']),
+            version(2, ['main-8.4-fpm-bookworm-node26-amd64']),
+            version(3, ['pr-43-8.4-fpm-alpine3.25-node26-arm64']),
+            version(4, ['pr-42-8.4-fpm-alpine3.25-node26-arm64']),
+        ], states={42: 'closed', 43: 'open'})
+        self.assertEqual(self.run_cleanup(api), [1, 4])
+        self.assertEqual(set(api.versions), {2, 3})
+
     def test_merged_pr_cache_grace_period_for_targeted_and_daily_cleanup(self):
         for age, deleted in ((timedelta(hours=48, microseconds=-1), []),
                              (timedelta(hours=48), [1]),

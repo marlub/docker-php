@@ -11,7 +11,7 @@ import subprocess
 import sys
 from typing import Literal, Mapping, Sequence, TypedDict
 
-from image_config import ImageVariant, load_image_variants
+from image_config import ImageVariant, load_image_variants, variant_order
 
 
 Purpose = Literal["test", "publish"]
@@ -51,8 +51,17 @@ class ReportRow(TypedDict):
     state: Literal["Selected", "Not selected"]
 
 
+class BuildGroup(TypedDict):
+    id: str
+    minor: str
+    distribution: str
+    distribution_release: str
+    variants: list[ImageVariant]
+
+
 class CiPlan(TypedDict):
     phpimages: list[ImageVariant]
+    buildgroups: list[BuildGroup]
     report: list[ReportRow]
     renovate_changes: bool
 
@@ -120,9 +129,9 @@ def _file_at_commit(root: Path, commit: str, path: str) -> str | None:
         return None
 
 
-def _only_node_stages_changed(root: Path, changes: ChangeSet) -> bool:
-    before = _file_at_commit(root, changes.base_commit, "Dockerfile")
-    after = _file_at_commit(root, changes.head_commit, "Dockerfile")
+def _only_node_stages_changed(root: Path, changes: ChangeSet, path: str) -> bool:
+    before = _file_at_commit(root, changes.base_commit, path)
+    after = _file_at_commit(root, changes.head_commit, path)
     if before is None or after is None:
         return False
     shared_before = _without_node_stages(before)
@@ -146,9 +155,11 @@ def _affected_image_tags(
         if php_manifest:
             matching = [variant for variant in variants if variant["minor"] == php_manifest[1]]
         elif apk_lock:
-            matching = [variant for variant in variants if variant["alpine"] == apk_lock[1]]
-        elif path == "Dockerfile" and _only_node_stages_changed(root, changes):
-            matching = [variant for variant in variants if variant["node"]]
+            matching = [variant for variant in variants if variant["distribution"] == "alpine"
+                        and variant["distribution_release"] == apk_lock[1]]
+        elif path in {variant["dockerfile"] for variant in variants}:
+            matching = [variant for variant in variants if variant["dockerfile"] == path
+                        and (variant["node"] or not _only_node_stages_changed(root, changes, path))]
         else:
             matching = variants
         affected.update(variant["tagMinor"] for variant in matching)
@@ -184,8 +195,10 @@ def create_ci_plan(
             if php == "All" or variant["minor"] == php
         }
 
+    selected = [variant for variant in variants if variant["tagMinor"] in tags]
     return {
-        "phpimages": [variant for variant in variants if variant["tagMinor"] in tags],
+        "phpimages": selected,
+        "buildgroups": group_variants(selected),
         "report": [
             {
                 "tag": variant["tagMinor"],
@@ -195,6 +208,37 @@ def create_ci_plan(
         ],
         "renovate_changes": renovate_changes,
     }
+
+
+def group_variants(variants: Sequence[ImageVariant]) -> list[BuildGroup]:
+    groups: list[BuildGroup] = []
+    for base_target in sorted({variant["base_target"] for variant in variants}):
+        members = sorted([v for v in variants if v["base_target"] == base_target], key=variant_order)
+        first = members[0]
+        groups.append({"id": base_target, "minor": first["minor"],
+                       "distribution": first["distribution"], "distribution_release": first["distribution_release"],
+                       "variants": members})
+    return groups
+
+
+def prepare_build_group(entries: object, configured: Sequence[ImageVariant]) -> list[ImageVariant]:
+    """Accept a nonempty subset of one pinned PHP base family."""
+    if not isinstance(entries, list) or not entries:
+        raise PlanningError("Build group must contain at least one variant")
+    known = {variant["tagMinor"]: variant for variant in configured}
+    selected: list[ImageVariant] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("tagMinor"), str):
+            raise PlanningError("Invalid build group variant")
+        variant = known.get(entry["tagMinor"])
+        if variant is None or entry != variant:
+            raise PlanningError("Build group variant does not match the checked-out configuration")
+        selected.append(variant)
+    if len({(v["base_target"], v["minor"], v["distribution"], v["distribution_release"]) for v in selected}) != 1:
+        raise PlanningError("Build group variants must share a PHP base family")
+    if len({variant["node"] for variant in selected}) != len(selected):
+        raise PlanningError("Duplicate build group variant")
+    return sorted(selected, key=variant_order)
 
 
 def is_candidate_superseded(variant: ImageVariant, root: Path) -> bool:
@@ -242,6 +286,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check-current", help="Check whether one variant JSON entry is superseded")
+    mode.add_argument("--prepare-build-group", help="Validate selected variant JSON and emit ordered group CI inputs")
     mode.add_argument("--base-ref")
     mode.add_argument("--php", default="All", help="Rebuild one configured PHP minor, or All")
     parser.add_argument(
@@ -259,11 +304,17 @@ def _argument_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _argument_parser()
     args = parser.parse_args(argv)
-    if args.check_current is None and args.out is None:
+    if args.check_current is None and args.prepare_build_group is None and args.out is None:
         parser.error("--out is required for CI planning")
     root = Path(__file__).resolve().parent.parent
     try:
-        if args.check_current is not None:
+        if args.prepare_build_group is not None:
+            variants = prepare_build_group(json.loads(args.prepare_build_group), load_variants(root))
+            _append_github_outputs(args.github_output, {
+                "id": variants[0]["base_target"],
+                "variants": json.dumps(variants, separators=(",", ":")),
+            })
+        elif args.check_current is not None:
             superseded = is_candidate_superseded(json.loads(args.check_current), root)
             _append_github_outputs(args.github_output, {"superseded": str(superseded).lower()})
             print("Superseded" if superseded else "Current")

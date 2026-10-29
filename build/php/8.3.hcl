@@ -25,7 +25,12 @@ variable "PHP_8_3" {
   }
 }
 
+group "ci-8-3" {
+  targets = ["php-8-3", "php-8-3-node24"]
+}
+
 target "_php-8-3" {
+  labels = { "io.github.marlub.docker-php.base-target" = "php-8-3" }
   inherits = ["_common"]
   args = extension_args(PHP_8_3)
 }

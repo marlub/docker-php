@@ -95,7 +95,7 @@ jobs:
           python scripts/find_merged_pr_caches.py "${args[@]}"
 
   build-and-test:
-    name: ${{ matrix.phpimage.tagMinor }}
+    name: ${{ matrix.phpgroup.id }}
     permissions:
       contents: read
       packages: write
@@ -104,7 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        phpimage: ${{ fromJson(needs.select-variants.outputs.matrix).phpimages }}
+        phpgroup: ${{ fromJson(needs.select-variants.outputs.matrix).buildgroups }}
     uses: ./.github/workflows/template-images.yml
     with:
       publish: true
@@ -113,5 +113,5 @@ jobs:
       image: marlub/php
       cache-image: ghcr.io/marlub/php-buildcache
       merged-prs: ${{ needs.select-variants.outputs.merged-prs }}
-      variant: ${{ toJson(matrix.phpimage) }}
+      variants: ${{ toJson(matrix.phpgroup.variants) }}
       source-ref: ${{ needs.select-variants.outputs.source_ref }}
