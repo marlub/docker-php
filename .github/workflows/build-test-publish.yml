@@ -18,6 +18,8 @@ on:
       - docs/**
       - README.md
       - LICENSE
+      - .github/workflows/cache-cleanup.yml
+      - scripts/cleanup_registry_cache.py
       - renovate.json
       - .github/workflows/template-renovate.yml
       - tests/**
@@ -28,7 +30,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-php-images
@@ -42,11 +43,15 @@ env:
 jobs:
   select-variants:
     name: Plan publication
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       has_changes: ${{ steps.plan.outputs.has_changes }}
       source_ref: ${{ steps.source.outputs.ref }}
+      merged-prs: ${{ steps.merged-prs.outputs.merged-prs || '[]' }}
     steps:
       - name: Restrict manual publication to main
         if: github.event_name == 'workflow_dispatch'
@@ -74,9 +79,26 @@ jobs:
           else
             python scripts/plan_ci.py --purpose publish --base-ref "$BASE_REF" --out "$RUNNER_TEMP/matrix.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Find merged PR cache sources
+        id: merged-prs
+        if: steps.plan.outputs.has_changes == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
+          BASE_REF: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          args=(--repository "$GITHUB_REPOSITORY" --source-ref "$SOURCE_REF"
+                --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY")
+          if [ "$EVENT_NAME" = push ]; then args+=(--base-ref "$BASE_REF"); fi
+          python scripts/find_merged_pr_caches.py "${args[@]}"
 
   build-and-test:
     name: ${{ matrix.phpimage.tagMinor }}
+    permissions:
+      contents: read
+      packages: write
     needs: select-variants
     if: needs.select-variants.outputs.has_changes == 'true'
     strategy:
@@ -89,5 +111,7 @@ jobs:
       no-cache: ${{ inputs.no-cache || false }}
       registry: ghcr.io
       image: marlub/php
+      cache-image: ghcr.io/marlub/php-buildcache
+      merged-prs: ${{ needs.select-variants.outputs.merged-prs }}
       variant: ${{ toJson(matrix.phpimage) }}
       source-ref: ${{ needs.select-variants.outputs.source_ref }}
