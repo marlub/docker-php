@@ -19,7 +19,10 @@ INITIAL_PUSH_SHA = "0" * 40
 
 # Keep trigger exclusions aligned with the workflows' paths-ignore lists.
 # Patterns are exact root-relative paths or directory/**.
-PR_IGNORED_PATHS = ("docs/**", "README.md", "LICENSE")
+PR_IGNORED_PATHS = (
+    "docs/**", "README.md", "LICENSE",
+    ".github/workflows/cache-cleanup.yml", "scripts/cleanup_registry_cache.py",
+)
 RENOVATE_PATHS = ("renovate.json", ".github/workflows/template-renovate.yml")
 IMAGE_TEST_IGNORED_PATHS = PR_IGNORED_PATHS + RENOVATE_PATHS
 PUBLICATION_IGNORED_PATHS = IMAGE_TEST_IGNORED_PATHS + (

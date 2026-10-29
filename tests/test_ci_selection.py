@@ -29,6 +29,8 @@ class SelectionPurposeTests(RepositoryTests):
             '.github/workflows/template-images.yml': (8, 8),
             '.github/workflows/build-test-publish.yml': (8, 8),
             '.github/workflows/build-test.yml': (8, 0),
+            '.github/workflows/cache-cleanup.yml': (0, 0),
+            'scripts/cleanup_registry_cache.py': (0, 0),
             '.github/workflows/unknown.yml': (8, 8),
             'tests/new_test.py': (8, 0),
             'tests/test_image.sh': (8, 0),
@@ -63,6 +65,8 @@ class SelectionPurposeTests(RepositoryTests):
             ('tests/new_test.py', 8, False),
             ('renovate.json', 2, True),
             ('README.md', 2, False),
+            ('.github/workflows/cache-cleanup.yml', 2, False),
+            ('scripts/cleanup_registry_cache.py', 2, False),
         ], start=1):
             with self.subTest(filename=filename):
                 before = self.git('rev-parse', 'HEAD')
@@ -110,6 +114,7 @@ class SelectionPurposeTests(RepositoryTests):
         entry = self.entries()[0]
         for filename in ('tests/new_test.py', 'tests/verify_image.py', 'scripts/plan_ci.py',
                          'scripts/refresh_apk_locks.py', '.github/workflows/build-test.yml',
+                         '.github/workflows/cache-cleanup.yml', 'scripts/cleanup_registry_cache.py',
                          '.github/workflows/template-renovate.yml', 'renovate.json'):
             with self.subTest(filename=filename):
                 self.change_file(filename)

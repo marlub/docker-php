@@ -12,6 +12,14 @@ on:
       image:
         required: true
         type: string
+      cache-image:
+        description: Registry image used only for build caches
+        required: true
+        type: string
+      merged-prs:
+        description: JSON array of trusted merged PR numbers to import on main
+        default: '[]'
+        type: string
       variant:
         required: true
         type: string
@@ -46,6 +54,78 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.source-ref }}
+      - name: Configure build cache
+        id: cache
+        env:
+          CACHE_IMAGE: ${{ inputs.cache-image }}
+          ARCH: ${{ matrix.arch }}
+          PUBLISH: ${{ inputs.publish }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGED_PRS: ${{ inputs.merged-prs }}
+        run: |
+          main_ref="$CACHE_IMAGE:main-$TAG_MINOR-$ARCH"
+          write_ref=''
+          merged_numbers=()
+          if [ "$ACTOR" != 'dependabot[bot]' ]; then
+            if [ "$PUBLISH" = true ] && [ "$REF" = refs/heads/main ] &&
+               { [ "$EVENT_NAME" = push ] || [ "$EVENT_NAME" = workflow_dispatch ]; }; then
+              write_ref="$main_ref"
+              if ! merged_prs=$(jq -cse '
+                if length == 1 and (.[0] | type == "array" and all(.[];
+                  type == "number" and . > 0 and . == floor and . <= 9007199254740991))
+                then .[0] | unique else error("Expected an array of positive PR numbers") end
+              ' <<< "$MERGED_PRS"); then
+                echo '::warning::Invalid merged PR cache input; using main cache only'
+                merged_prs='[]'
+              fi
+              mapfile -t merged_numbers < <(jq -r '.[]' <<< "$merged_prs")
+            elif [ "$PUBLISH" = false ] && [ "$EVENT_NAME" = pull_request ] &&
+                 [ "$PR_HEAD_REPOSITORY" = "$REPOSITORY" ]; then
+              [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+              write_ref="$CACHE_IMAGE:pr-$PR_NUMBER-$TAG_MINOR-$ARCH"
+            fi
+          fi
+          {
+            echo "registry=${CACHE_IMAGE%%/*}"
+            echo "write=$([ -n "$write_ref" ] && echo true || echo false)"
+            echo 'set<<CACHE_SETTINGS'
+            echo "*.cache-from=type=registry,ref=$main_ref"
+            for number in "${merged_numbers[@]}"; do
+              echo "*.cache-from+=type=registry,ref=$CACHE_IMAGE:pr-$number-$TAG_MINOR-$ARCH"
+            done
+            if [ -n "$write_ref" ]; then
+              if [ "$write_ref" != "$main_ref" ]; then
+                echo "*.cache-from+=type=registry,ref=$write_ref"
+              fi
+              echo "*.cache-to=type=registry,ref=$write_ref,mode=max,ignore-error=true"
+            fi
+            echo CACHE_SETTINGS
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              printf '### Build cache sources (%s, %s)\n\n' "$TAG_MINOR" "$ARCH"
+              printf -- '- %s\n' "$main_ref"
+              for number in "${merged_numbers[@]}"; do
+                printf -- '- %s:pr-%s-%s-%s\n' "$CACHE_IMAGE" "$number" "$TAG_MINOR" "$ARCH"
+              done
+              if [ -n "$write_ref" ] && [ "$write_ref" != "$main_ref" ]; then
+                printf -- '- %s\n' "$write_ref"
+              fi
+              printf '\nCache export: %s\n\n' "${write_ref:-disabled}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Log in to cache registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        if: steps.cache.outputs.write == 'true'
+        with:
+          registry: ${{ steps.cache.outputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         with:
           buildkitd-config-inline: |
@@ -66,8 +146,7 @@ jobs:
             *.tags=test
             *.output=type=docker
             ${{ inputs.publish && format('*.output+=type=oci,dest={0}/image.tar', runner.temp) || '' }}
-            *.cache-from=type=gha,version=2,scope=${{ fromJson(inputs.variant).tagMinor }}-${{ matrix.arch }}
-            ${{ inputs.publish && github.ref == 'refs/heads/main' && format('*.cache-to=type=gha,version=2,scope={0}-{1},mode=max,ignore-error=true,ghtoken={2},repository={3}', fromJson(inputs.variant).tagMinor, matrix.arch, secrets.GITHUB_TOKEN, github.repository) || '' }}
+            ${{ steps.cache.outputs.set }}
             *.labels.io.github.marlub.docker-php.variant=${{ fromJson(inputs.variant).tagMinor }}
             *.labels.org.opencontainers.image.revision=${{ inputs.source-ref }}
       - name: Test built image
