@@ -1,0 +1,37 @@
+name: Clean up registry build caches
+
+on:
+  pull_request_target:
+    types: [closed]
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+
+concurrency:
+  group: registry-cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      # Always use trusted base-repository code, never a PR head or merge ref.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Delete closed PR and expired untagged cache versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CACHE_PACKAGE: php-buildcache
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          args=(--repository "$GITHUB_REPOSITORY" --package "$CACHE_PACKAGE")
+          if [ -n "$PR_NUMBER" ]; then args+=(--pr "$PR_NUMBER"); fi
+          python3 scripts/cleanup_registry_cache.py "${args[@]}"

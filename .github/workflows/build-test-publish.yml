@@ -18,6 +18,8 @@ on:
       - docs/**
       - README.md
       - LICENSE
+      - .github/workflows/cache-cleanup.yml
+      - scripts/cleanup_registry_cache.py
       - renovate.json
       - .github/workflows/template-renovate.yml
       - tests/**
@@ -28,7 +30,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-php-images
@@ -77,6 +78,9 @@ jobs:
 
   build-and-test:
     name: ${{ matrix.phpimage.tagMinor }}
+    permissions:
+      contents: read
+      packages: write
     needs: select-variants
     if: needs.select-variants.outputs.has_changes == 'true'
     strategy:
@@ -89,5 +93,6 @@ jobs:
       no-cache: ${{ inputs.no-cache || false }}
       registry: ghcr.io
       image: marlub/php
+      cache-image: ghcr.io/marlub/php-buildcache
       variant: ${{ toJson(matrix.phpimage) }}
       source-ref: ${{ needs.select-variants.outputs.source_ref }}

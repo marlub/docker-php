@@ -6,6 +6,8 @@ on:
       - docs/**
       - README.md
       - LICENSE
+      - .github/workflows/cache-cleanup.yml
+      - scripts/cleanup_registry_cache.py
 
 permissions:
   contents: read
@@ -49,6 +51,9 @@ jobs:
 
   build-and-test:
     name: ${{ matrix.phpimage.tagMinor }}
+    permissions:
+      contents: read
+      packages: write
     needs: read-matrix
     if: needs.read-matrix.outputs.has_changes == 'true'
     strategy:
@@ -60,6 +65,7 @@ jobs:
       publish: false
       registry: ''
       image: ''
+      cache-image: ghcr.io/marlub/php-buildcache
       variant: ${{ toJson(matrix.phpimage) }}
       source-ref: ${{ needs.read-matrix.outputs.source_ref }}
 
