@@ -10,7 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
-from cleanup_registry_cache import CleanupError, GitHubAPI, cleanup
+from cleanup_registry_cache import CleanupError, cleanup
+from github_api import GitHubAPI, GitHubAPIError
 
 
 NOW = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
@@ -38,7 +39,8 @@ class FakeAPI:
         if path == '/users/marlub':
             return {'type': self.owner_type}
         if '/pulls/' in path:
-            return {'state': self.states[int(path.rsplit('/', 1)[1])]}
+            state = self.states[int(path.rsplit('/', 1)[1])]
+            return {'state': state, 'merged_at': None} if isinstance(state, str) else copy.deepcopy(state)
         parsed = urlsplit(path)
         if parsed.query:
             if self.missing_package:
@@ -88,6 +90,26 @@ class RegistryCleanupTests(unittest.TestCase):
     def test_reopened_pr_is_preserved_even_on_closed_event(self):
         api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'])], states={42: 'open'})
         self.assertEqual(self.run_cleanup(api, pr_number=42), [])
+
+    def test_merged_pr_cache_grace_period_for_targeted_and_daily_cleanup(self):
+        for age, deleted in ((timedelta(hours=48, microseconds=-1), []),
+                             (timedelta(hours=48), [1]),
+                             (timedelta(hours=48, microseconds=1), [1])):
+            for targeted in (False, True):
+                with self.subTest(age=age, targeted=targeted):
+                    api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'])], states={
+                        42: {'state': 'closed', 'merged_at': (NOW - age).isoformat()},
+                    })
+                    self.assertEqual(self.run_cleanup(api, pr_number=42 if targeted else None), deleted)
+
+    def test_old_cache_does_not_shorten_grace_and_fresh_cache_does_not_extend_it(self):
+        for merge_age, cache_age, deleted in ((timedelta(hours=1), timedelta(days=30), []),
+                                               (timedelta(hours=49), timedelta(minutes=1), [1])):
+            with self.subTest(merge_age=merge_age):
+                api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'], cache_age)], states={
+                    42: {'state': 'closed', 'merged_at': (NOW - merge_age).isoformat()},
+                })
+                self.assertEqual(self.run_cleanup(api), deleted)
 
     def test_untagged_cutoff_is_strictly_older_than_seven_days(self):
         api = FakeAPI([
@@ -159,12 +181,12 @@ class GitHubAPITests(unittest.TestCase):
                 for missing_ok in (True, False):
                     with self.subTest(method=method, status=status, missing_ok=missing_ok):
                         error = HTTPError('https://api.github.com/test', status, 'failed', {}, None)
-                        with patch('cleanup_registry_cache.urlopen', side_effect=error):
+                        with patch('github_api.urlopen', side_effect=error):
                             api = GitHubAPI('test-token')
                             if status == 404 and missing_ok:
                                 self.assertIsNone(api.request(method, '/test', missing_ok=missing_ok))
                             else:
-                                with self.assertRaisesRegex(CleanupError, f'HTTP {status}'):
+                                with self.assertRaisesRegex(GitHubAPIError, f'HTTP {status}'):
                                     api.request(method, '/test', missing_ok=missing_ok)
 
 

@@ -3,43 +3,21 @@
 
 import argparse
 from datetime import datetime, timedelta, timezone
-import json
 import os
 import re
 import sys
-from urllib.error import HTTPError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+
+from github_api import GitHubAPI, GitHubAPIError
 
 
 PR_TAG = re.compile(r"pr-([1-9][0-9]*)-[a-zA-Z0-9_][a-zA-Z0-9_.-]*-(?:amd64|arm64)")
 UNTAGGED_RETENTION = timedelta(days=7)
+MERGED_PR_RETENTION = timedelta(hours=48)
 
 
-class CleanupError(RuntimeError):
+class CleanupError(GitHubAPIError):
     pass
-
-
-class GitHubAPI:
-    def __init__(self, token, api_url="https://api.github.com"):
-        self.token = token
-        self.api_url = api_url.rstrip("/")
-
-    def request(self, method, path, *, missing_ok=False):
-        request = Request(self.api_url + path, method=method, headers={
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "docker-php-cache-cleanup",
-        })
-        try:
-            with urlopen(request, timeout=30) as response:
-                body = response.read()
-                return json.loads(body) if body else None
-        except HTTPError as error:
-            if missing_ok and error.code == 404:
-                return None
-            raise CleanupError(f"{method} {path}: HTTP {error.code}") from error
 
 
 def package_path(api, repository, package):
@@ -70,7 +48,7 @@ def list_versions(api, path):
         page += 1
 
 
-def eligible_version(version, *, pr_number, now, is_closed):
+def eligible_version(version, *, pr_number, now, pr_expired):
     # Fail on missing metadata rather than treating it as an untagged version.
     tags = version["metadata"]["container"]["tags"]
     if not tags:
@@ -86,7 +64,7 @@ def eligible_version(version, *, pr_number, now, is_closed):
     if len(numbers) != 1:
         return False
     number = numbers.pop()
-    return (pr_number is None or number == pr_number) and is_closed(number)
+    return (pr_number is None or number == pr_number) and pr_expired(number)
 
 
 def cleanup(api, repository, package, *, pr_number=None, now=None, dry_run=False):
@@ -94,16 +72,19 @@ def cleanup(api, repository, package, *, pr_number=None, now=None, dry_run=False
     path = package_path(api, repository, package)
     states = {}
 
-    def is_closed(number):
+    def pr_expired(number):
         if number not in states:
             pull = api.request("GET", f"/repos/{repository}/pulls/{number}")
-            states[number] = pull["state"] == "closed"
+            merged = pull["merged_at"]
+            states[number] = pull["state"] == "closed" and (
+                merged is None or now - datetime.fromisoformat(merged.replace("Z", "+00:00")) >= MERGED_PR_RETENTION
+            )
         return states[number]
 
     candidates = list_versions(api, path)
     deleted = []
     for version in candidates:
-        if not eligible_version(version, pr_number=pr_number, now=now, is_closed=is_closed):
+        if not eligible_version(version, pr_number=pr_number, now=now, pr_expired=pr_expired):
             continue
         version_path = f"{path}/versions/{version['id']}"
         # Builds can add a protected tag after listing; inspect again before deletion.
@@ -111,7 +92,7 @@ def cleanup(api, repository, package, *, pr_number=None, now=None, dry_run=False
         if current is None:
             continue
         states.clear()
-        if not eligible_version(current, pr_number=pr_number, now=now, is_closed=is_closed):
+        if not eligible_version(current, pr_number=pr_number, now=now, pr_expired=pr_expired):
             continue
         if not dry_run:
             api.request("DELETE", version_path, missing_ok=True)
@@ -142,7 +123,7 @@ def main():
     try:
         cleanup(GitHubAPI(token, os.environ.get("GITHUB_API_URL", "https://api.github.com")),
                 args.repository, args.package, pr_number=args.pr, dry_run=args.dry_run)
-    except (CleanupError, OSError, KeyError, TypeError, ValueError) as error:
+    except (GitHubAPIError, OSError, KeyError, TypeError, ValueError) as error:
         print(f"Cache cleanup failed: {error}", file=sys.stderr)
         return 1
     return 0
