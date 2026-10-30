@@ -111,7 +111,7 @@ def real_check(args):
     request = args.logs / 'php-build-groups' / selected[0]['base_target'] / 'request.json'
     subprocess.run([sys.executable, str(ROOT / 'scripts/build_group.py'), 'run', '--request', str(request)],
                    cwd=ROOT, env=env, check=True)
-    print('Real Alpine group controller and all selected image tests passed', flush=True)
+    print(f'Real {selected[0]["base_target"]} group controller and all selected image tests passed', flush=True)
 
 
 def main():

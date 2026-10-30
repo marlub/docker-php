@@ -30,6 +30,7 @@ PUBLICATION_IGNORED_PATHS = IMAGE_TEST_IGNORED_PATHS + (
     "scripts/plan_ci.py",
     "scripts/image_config.py",
     "scripts/refresh_apk_locks.py",
+    "scripts/refresh_apt_locks.py",
     ".github/workflows/build-test.yml",
 )
 
@@ -150,13 +151,13 @@ def _affected_image_tags(
         if any(fnmatchcase(path, pattern) for pattern in ignored):
             continue
         php_manifest = re.fullmatch(r"build/php/([^/]+)\.hcl", path)
-        apk_lock = re.fullmatch(r"build/apk/([^/]+)/[^/]+\.json", path)
+        package_lock = re.fullmatch(r"build/(apk|apt)/([^/]+)/[^/]+\.json", path)
         matching: Sequence[ImageVariant]
         if php_manifest:
             matching = [variant for variant in variants if variant["minor"] == php_manifest[1]]
-        elif apk_lock:
-            matching = [variant for variant in variants if variant["distribution"] == "alpine"
-                        and variant["distribution_release"] == apk_lock[1]]
+        elif package_lock:
+            matching = [variant for variant in variants if variant["distribution"] == {"apk": "alpine", "apt": "debian"}[package_lock[1]]
+                        and variant["distribution_release"] == package_lock[2]]
         elif path in {variant["dockerfile"] for variant in variants}:
             matching = [variant for variant in variants if variant["dockerfile"] == path
                         and (variant["node"] or not _only_node_stages_changed(root, changes, path))]

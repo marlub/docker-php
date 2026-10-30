@@ -52,3 +52,12 @@ target "_common" {
     RUNTIME_PACKAGES = join(" ", RUNTIME_PACKAGES)
   }
 }
+
+# Debian package names and ABI versions are independent of the Alpine profile.
+target "_debian" {
+  dockerfile = "Dockerfile.debian"
+  args = {
+    BUILD_PACKAGES = "automake libtool unzip git libfreetype6-dev libjpeg62-turbo-dev libpng-dev libxpm-dev libwebp-dev libavif-dev libicu-dev libldap-dev libzip-dev libpq-dev librabbitmq-dev liblzf-dev libzstd-dev liblz4-dev jq"
+    RUNTIME_PACKAGES = "libbrotli1 libfreetype6 libjpeg62-turbo libpng16-16t64 libxpm4 libwebp7 libavif16 libicu76 libldap2 libzip5 libpq5 librabbitmq4 liblzf1 libzstd1 liblz4-1 libstdc++6 libgcc-s1 libatomic1"
+  }
+}

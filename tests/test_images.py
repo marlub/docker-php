@@ -33,7 +33,7 @@ class RepositoryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         for name in ('build', 'scripts', '.github'):
             shutil.copytree(ROOT / name, self.root / name, ignore=shutil.ignore_patterns('__pycache__'))
-        for name in ('.gitignore', 'Dockerfile', 'entrypoint.sh', 'README.md', 'renovate.json', 'docker-bake.hcl'):
+        for name in ('.gitignore', 'Dockerfile', 'Dockerfile.debian', 'entrypoint.sh', 'README.md', 'renovate.json', 'docker-bake.hcl'):
             shutil.copy(ROOT / name, self.root / name)
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.email', 'test@example.test')
@@ -81,16 +81,16 @@ class RepositoryTests(unittest.TestCase):
 
 
 class SelectionTests(RepositoryTests):
-    def test_eight_variants_and_existing_tags(self):
+    def test_sixteen_variants_and_existing_tags(self):
         entries = self.entries()
-        self.assertEqual(len(entries), 8)
+        self.assertEqual(len(entries), 16)
         self.assertEqual(entries[0]['tagMinor'], '8.2-fpm-alpine')
-        self.assertEqual(entries[-1]['tagMinor'], '8.5-fpm-alpine-node24')
+        self.assertEqual(entries[-1]['tagMinor'], '8.5-fpm-trixie-node24')
         self.assertEqual(entries[0]['tagPatch'], entries[0]['php_version'] + '-fpm-alpine')
         self.assertNotIn('opcache', entries[-1]['extensions'].split())
         self.assertEqual(entries[0]['source_ref'], self.base)
-        self.assertEqual(entries[0]['bake_target'], 'php-8-2')
-        self.assertEqual(entries[1]['bake_target'], 'php-8-2-node24')
+        self.assertEqual(entries[0]['bake_target'], 'php-8-2-alpine')
+        self.assertEqual(entries[1]['bake_target'], 'php-8-2-alpine-node24')
 
     def test_no_changes_select_nothing_without_registry(self):
         result = create_ci_plan(self.entries(), self.root, self.base)
@@ -100,7 +100,7 @@ class SelectionTests(RepositoryTests):
     def test_resolution_needs_no_daemon_and_ignores_ambient_overrides(self):
         with patch.dict(os.environ, {'DOCKER_HOST': 'unix:///nonexistent-docker.sock',
                                      'EXTENSIONS': '', 'PHP_8_2': 'invalid'}):
-            self.assertEqual(len(self.entries()), 8)
+            self.assertEqual(len(self.entries()), 16)
             self.assertIn('grpc', self.entries()[0]['extension_versions'])
 
     def test_lock_refresh_can_resolve_bases_without_existing_locks(self):
@@ -142,7 +142,7 @@ class SelectionTests(RepositoryTests):
             self.change_arg(minor, 'REDIS_VERSION', '6.3.99')
             self.commit()
             entries = self.entries()
-            self.assertEqual(len(affected_image_tags(entries, self.root, before)), 2)
+            self.assertEqual(len(affected_image_tags(entries, self.root, before)), 4)
             self.assertEqual(next(e for e in entries if e['minor'] == minor)['extension_versions']['redis'], '6.3.99')
         self.assertEqual(original[0]['extension_versions']['redis'], '6.3.0')
 
@@ -155,8 +155,8 @@ class SelectionTests(RepositoryTests):
         self.change_arg('8.6', 'EXTENSIONS', ' '.join(n for n in extensions if n != 'grpc'))
         path.write_text(re.sub(r'(?m)^    GRPC_VERSION = .+\n', '', path.read_text()))
         entries = self.entries()
-        self.assertEqual(len(entries), 10)
-        for entry in entries[-2:]:
+        self.assertEqual(len(entries), 20)
+        for entry in entries[-4:]:
             self.assertEqual(entry['minor'], '8.6')
             self.assertEqual(entry['bake_args']['BUILD_GRPC'], 'false')
             self.assertNotIn('grpc', entry['extension_versions'])
@@ -193,7 +193,7 @@ class SelectionTests(RepositoryTests):
         path.write_text('invalid HCL {')
         with self.assertRaises(ConfigurationError): self.entries()
         path.write_text(original)
-        self.change_arg('8.2', 'PHP_BASE_IMAGE', self.entries()[2]['php_image'])
+        self.change_arg('8.2', 'PHP_BASE_IMAGE', self.entries()[4]['php_image'])
         with self.assertRaises(ConfigurationError): self.entries()
 
     def test_built_in_opcache_cannot_be_requested_on_php85(self):
@@ -205,7 +205,7 @@ class SelectionTests(RepositoryTests):
         self.change_arg('8.3', 'REDIS_CONFIGURE_OPTIONS', '--enable-redis-session')
         entries = self.entries()
         self.assertNotIn('REDIS_CONFIGURE_OPTIONS', entries[0]['bake_args'])
-        self.assertEqual(entries[2]['bake_args']['REDIS_CONFIGURE_OPTIONS'], '--enable-redis-session')
+        self.assertEqual(entries[4]['bake_args']['REDIS_CONFIGURE_OPTIONS'], '--enable-redis-session')
 
     def test_node_pin_and_stage_changes_select_only_node(self):
         path = self.root / 'Dockerfile'
@@ -216,12 +216,12 @@ class SelectionTests(RepositoryTests):
                 self.assertEqual(len(changed), 4)
                 self.assertTrue(all('node24' in tag for tag in changed))
 
-    def test_shared_bake_and_unknown_dockerfile_changes_select_all(self):
+    def test_shared_bake_and_recipe_changes_select_their_consumers(self):
         for name, content in [('docker-bake.hcl', '\n# shared configuration\n'), ('Dockerfile', '\nFROM php AS other\n')]:
             changed = self.affected(lambda: (self.root / name).write_text((self.root / name).read_text() + content))
-            self.assertEqual(len(changed), 8)
+            self.assertEqual(len(changed), 16 if name == 'docker-bake.hcl' else 8)
 
-    def test_pie_and_composer_updates_select_all(self):
+    def test_alpine_pie_and_composer_updates_select_alpine(self):
         path = self.root / 'Dockerfile'
         for tool in ('PIE_IMAGE', 'COMPOSER_IMAGE'):
             changed = self.affected(lambda: path.write_text(re.sub(rf'^(ARG {tool}="[^"@]+:)[^"@]+', r'\g<1>999.0.0-bin', path.read_text(), flags=re.M)))
@@ -237,7 +237,7 @@ class SelectionTests(RepositoryTests):
         self.change_arg('8.2', 'REDIS_VERSION', '6.3.1'); self.commit()
         self.change_arg('8.3', 'XHPROF_COMMIT', 'a' * 40); self.commit()
         tags = affected_image_tags(self.entries(), self.root, self.base)
-        self.assertEqual(len(tags), 4)
+        self.assertEqual(len(tags), 8)
         self.assertTrue(all(tag.startswith(('8.2-', '8.3-')) for tag in tags))
 
     def test_pr_selection_uses_checked_out_merge_result(self):
@@ -246,27 +246,27 @@ class SelectionTests(RepositoryTests):
         self.git('checkout', 'main')
         (self.root / 'README.md').write_text('new documentation'); base = self.commit()
         self.git('merge', '--no-ff', '-qm', 'merge result', 'feature')
-        self.assertEqual(len(create_ci_plan(self.entries(), self.root, base)['phpimages']), 8)
+        self.assertEqual(len(create_ci_plan(self.entries(), self.root, base)['phpimages']), 16)
 
     def test_renames_additions_and_deletions(self):
         path = self.root / 'scripts/new.sh'; path.write_text('echo test\n'); self.commit()
-        self.assertEqual(len(self.affected(lambda: path.rename(self.root / 'moved.txt'))), 8)
-        self.assertEqual(len(self.affected(lambda: (self.root / 'moved.txt').unlink())), 8)
+        self.assertEqual(len(self.affected(lambda: path.rename(self.root / 'moved.txt'))), 16)
+        self.assertEqual(len(self.affected(lambda: (self.root / 'moved.txt').unlink())), 16)
 
     def test_deleted_minor_selects_previously_built_variant_for_supersession(self):
         entries = self.entries(); (self.root / 'build/php/8.2.hcl').unlink(); self.commit()
-        self.assertEqual(len(affected_image_tags(entries, self.root, self.base)), 2)
-        self.assertEqual(len(self.entries()), 6)
+        self.assertEqual(len(affected_image_tags(entries, self.root, self.base)), 4)
+        self.assertEqual(len(self.entries()), 12)
 
     def test_initial_push_and_manual_selection(self):
         entries = self.entries()
         for purpose in ('test', 'publish'):
             initial = create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)
-            self.assertEqual(len(initial['phpimages']), 8); self.assertTrue(initial['renovate_changes'])
-            self.assertEqual(len(create_ci_plan(entries, self.root, php='All', purpose=purpose)['phpimages']), 8)
+            self.assertEqual(len(initial['phpimages']), 16); self.assertTrue(initial['renovate_changes'])
+            self.assertEqual(len(create_ci_plan(entries, self.root, php='All', purpose=purpose)['phpimages']), 16)
             for minor in ('8.2', '8.3', '8.4', '8.5'):
                 selected = create_ci_plan(entries, self.root, php=minor, purpose=purpose)['phpimages']
-                self.assertEqual(len(selected), 2); self.assertTrue(all(e['minor'] == minor for e in selected))
+                self.assertEqual(len(selected), 4); self.assertTrue(all(e['minor'] == minor for e in selected))
         with self.assertRaises(PlanningError): create_ci_plan(entries, self.root, php='8.1')
 
     def test_invalid_references_fail_selection(self):
@@ -277,7 +277,7 @@ class SelectionTests(RepositoryTests):
         script = self.root / 'scripts/plan_ci.py'; output = self.root / '.git/matrix.json'; gh = self.root / '.git/outputs'
         result = subprocess.run([sys.executable, str(script), '--php', '8.4', '--out', str(output), '--github-output', str(gh)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(json.loads(output.read_text())['phpimages']), 2)
+        self.assertEqual(len(json.loads(output.read_text())['phpimages']), 4)
         self.assertIn('has_changes=true', gh.read_text())
         for extra in (['--published'], ['--image', IMAGE], ['--base-ref', 'missing']):
             self.assertNotEqual(subprocess.run([sys.executable, str(script), '--out', str(output), *extra], capture_output=True).returncode, 0)
@@ -289,7 +289,7 @@ class CurrentSourceTests(RepositoryTests):
         self.change_arg('8.2', 'REDIS_VERSION', '999.0.0')
         self.commit()
         self.assertTrue(is_candidate_superseded(entries[0], self.root))
-        self.assertFalse(is_candidate_superseded(entries[2], self.root))
+        self.assertFalse(is_candidate_superseded(entries[4], self.root))
 
     def test_node_update_supersedes_only_node(self):
         plain, node = self.entries()[:2]
@@ -540,9 +540,10 @@ class RenovateTests(unittest.TestCase):
                         expression=re.sub(r'\(\?<([a-zA-Z]+)>',r'(?P<\1>',expression)
                         matches+=list(re.finditer(expression,path.read_text()))
             counts.append(len(matches))
-        self.assertEqual(counts[:3],[4,28,4])
+        self.assertEqual(counts[:3],[8,28,4])
         self.assertEqual(counts[3:5], [len(json.loads((ROOT/f'build/apk/3.24/{arch}.json').read_text())['packages']) for arch in ('amd64','arm64')])
-        self.assertEqual(counts[5:], [1, 1, 0])
+        self.assertEqual(counts[5:8], [1, 1, 0])
+        self.assertEqual(counts[8:], [len(json.loads((ROOT/f'build/apt/trixie/{arch}.json').read_text())['packages']) for arch in ('amd64', 'arm64')])
 
     def test_revision_aware_architecture_specific_lookup(self):
         config=json.loads((ROOT/'renovate.json').read_text())

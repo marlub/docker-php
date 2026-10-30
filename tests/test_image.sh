@@ -27,6 +27,8 @@ run_container() {
     printf '%s\n' "$result"
 }
 
+distribution=$(run_container "$IMAGE" sh -c '. /etc/os-release; echo "$ID"')
+
 check_modules='foreach (array_slice($argv, 1) as $name) {
     $loaded = extension_loaded($name === "opcache" ? "Zend OPcache" : $name);
     echo $name, "=", $loaded ? "1" : "0", "\n";
@@ -144,7 +146,19 @@ if [ -n "$NODE_VERSION" ]; then
     output=$(run_container "$IMAGE" node -v)
     case "$output" in "v$NODE_VERSION."*) ;; *) echo "$output" >&2; exit 1 ;; esac
     run_container "$IMAGE" npm --version
+    output=$(run_container "$IMAGE" sh -c 'ldd /usr/local/bin/node')
+    if printf '%s\n' "$output" | grep -q 'not found'; then echo "$output" >&2; exit 1; fi
 fi
+
+if [ "$distribution" = debian ]; then
+    echo '> Extension shared libraries resolve'
+    output=$(run_container "$IMAGE" sh -c 'find "$(php-config --extension-dir)" -name "*.so" -exec ldd {} \;')
+    if printf '%s\n' "$output" | grep -q 'not found'; then echo "$output" >&2; exit 1; fi
+fi
+
+echo '> Entrypoint preserves command arguments and environment'
+output=$(run_container -e ARGUMENT_TEST='preserved value' "$IMAGE" php -r 'echo json_encode([getenv("ARGUMENT_TEST"), array_slice($argv, 1)]);' -- 'two words' 'literal $value' '' '"quoted"')
+[ "$output" = '["preserved value",["two words","literal $value","","\"quoted\""]]' ]
 
 echo '> PIE and legacy installer clients are absent'
 run_container "$IMAGE" sh -c 'for tool in pie pecl pear peardev install-php-extensions; do if command -v "$tool"; then exit 1; fi; done'
@@ -155,3 +169,12 @@ output=$(run_container -e APP_UID=1000 "$IMAGE" sh -c 'id -u; php-fpm -t >/dev/n
 echo '> Default UID and FPM configuration work'
 output=$(run_container "$IMAGE" sh -c 'id -u; php-fpm -t >/dev/null 2>&1')
 [ "$output" = 0 ]
+
+# Debian service users have nologin shells, and custom users may reuse a group.
+if [ "$distribution" = debian ]; then
+    echo '> Existing Debian user and group work'
+    output=$(run_container -e APP_UID=33 "$IMAGE" sh -c 'id -u; php-fpm -t >/dev/null 2>&1')
+    [ "$output" = 33 ]
+    output=$(run_container -e APP_UID=12345 -e APP_GID=33 "$IMAGE" sh -c 'id -u; id -g')
+    [ "$output" = "$(printf '12345\n33')" ]
+fi

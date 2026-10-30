@@ -26,7 +26,7 @@ class BuildGroupTests(RepositoryTests):
                 with self.subTest(purpose=purpose, options=options):
                     plan = create_ci_plan(list(reversed(entries)), self.root, purpose=purpose, **options)
                     self.assert_groups(plan)
-                    self.assertEqual(len(plan['buildgroups']), 1 if 'php' in options else 4)
+                    self.assertEqual(len(plan['buildgroups']), 2 if 'php' in options else 8)
 
     def test_empty_node_only_and_minor_changes_never_broaden_selection(self):
         self.assertEqual(create_ci_plan(self.entries(), self.root, self.base)['buildgroups'], [])
@@ -43,7 +43,7 @@ class BuildGroupTests(RepositoryTests):
         self.commit()
         plan = create_ci_plan(self.entries(), self.root, before)
         self.assert_groups(plan)
-        self.assertEqual([g['minor'] for g in plan['buildgroups']], ['8.4'])
+        self.assertEqual([g['minor'] for g in plan['buildgroups']], ['8.4', '8.4'])
         self.assertEqual(len(plan['buildgroups'][0]['variants']), 2)
 
     def test_plain_only_subset_is_not_expanded(self):
@@ -90,43 +90,46 @@ class SelectionPurposeTests(RepositoryTests):
         path = self.root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         content = path.read_text() if path.exists() else ''
-        path.write_text(content.replace('RUN cp ', 'RUN cp -v ', 1) if filename == 'Dockerfile' else content + '\n')
+        path.write_text(content.replace('RUN cp ', 'RUN cp -v ', 1) if filename in ('Dockerfile', 'Dockerfile.debian') else content + '\n')
         self.commit()
 
     def test_publication_inputs_and_pr_only_paths(self):
         cases = {
             'Dockerfile': (8, 8),
-            'docker-bake.hcl': (8, 8),
-            'entrypoint.sh': (8, 8),
-            'build/shared.json': (8, 8),
-            'build/php/8.3.hcl': (2, 2),
+            'Dockerfile.debian': (8, 8),
+            'build/apt/trixie/arm64.json': (8, 8),
+            'scripts/refresh_apt_locks.py': (16, 0),
+            'docker-bake.hcl': (16, 16),
+            'entrypoint.sh': (16, 16),
+            'build/shared.json': (16, 16),
+            'build/php/8.3.hcl': (4, 4),
             'build/apk/3.24/amd64.json': (8, 8),
-            'scripts/build_pie_extension.sh': (8, 8),
-            'scripts/apk_lock.php': (8, 8),
-            '.github/workflows/template-images.yml': (8, 8),
-            '.github/actions/build-group/action.yml': (8, 8),
-            '.github/workflows/build-test-publish.yml': (8, 8),
-            '.github/workflows/build-test.yml': (8, 0),
+            'scripts/build_pie_extension.sh': (16, 16),
+            'scripts/apk_lock.php': (16, 16),
+            '.github/workflows/template-images.yml': (16, 16),
+            '.github/actions/build-group/action.yml': (16, 16),
+            '.github/workflows/build-test-publish.yml': (16, 16),
+            '.github/workflows/build-test.yml': (16, 0),
             '.github/workflows/cache-cleanup.yml': (0, 0),
             'scripts/cleanup_registry_cache.py': (0, 0),
-            '.github/workflows/unknown.yml': (8, 8),
-            'tests/new_test.py': (8, 0),
-            'tests/test_image.sh': (8, 0),
-            'tests/verify_image.py': (8, 0),
-            'scripts/plan_ci.py': (8, 0),
-            'scripts/image_config.py': (8, 0),
-            'scripts/refresh_apk_locks.py': (8, 0),
-            'scripts/unknown.sh': (8, 8),
+            '.github/workflows/unknown.yml': (16, 16),
+            'tests/new_test.py': (16, 0),
+            'tests/test_image.sh': (16, 0),
+            'tests/verify_image.py': (16, 0),
+            'scripts/plan_ci.py': (16, 0),
+            'scripts/image_config.py': (16, 0),
+            'scripts/refresh_apk_locks.py': (16, 0),
+            'scripts/unknown.sh': (16, 16),
             '.github/workflows/template-renovate.yml': (0, 0),
             'renovate.json': (0, 0),
             'README.md': (0, 0),
             'LICENSE': (0, 0),
             'docs/nested/building.md': (0, 0),
-            'future-input.json': (8, 8),
-            '.dockerignore': (8, 8),
-            'new-directory/input.txt': (8, 8),
-            'src/docs/runtime.json': (8, 8),
-            'new-directory/README.md': (8, 8),
+            'future-input.json': (16, 16),
+            '.dockerignore': (16, 16),
+            'new-directory/input.txt': (16, 16),
+            'src/docs/runtime.json': (16, 16),
+            'new-directory/README.md': (16, 16),
         }
         for filename, counts in cases.items():
             with self.subTest(filename=filename):
@@ -140,11 +143,11 @@ class SelectionPurposeTests(RepositoryTests):
 
     def test_mixed_changes_keep_job_selection_independent(self):
         for revision, (filename, test_count, renovate) in enumerate([
-            ('tests/new_test.py', 8, False),
-            ('renovate.json', 2, True),
-            ('README.md', 2, False),
-            ('.github/workflows/cache-cleanup.yml', 2, False),
-            ('scripts/cleanup_registry_cache.py', 2, False),
+            ('tests/new_test.py', 16, False),
+            ('renovate.json', 4, True),
+            ('README.md', 4, False),
+            ('.github/workflows/cache-cleanup.yml', 4, False),
+            ('scripts/cleanup_registry_cache.py', 4, False),
         ], start=1):
             with self.subTest(filename=filename):
                 before = self.git('rev-parse', 'HEAD')
@@ -156,22 +159,22 @@ class SelectionPurposeTests(RepositoryTests):
                 self.assertEqual(tested['renovate_changes'], renovate)
                 published = create_ci_plan(self.entries(), self.root, before, purpose='publish')
                 self.assertEqual([e['tagMinor'] for e in published['phpimages']],
-                                 ['8.3-fpm-alpine', '8.3-fpm-alpine-node24'])
+                                 ['8.3-fpm-alpine', '8.3-fpm-alpine-node24', '8.3-fpm-trixie', '8.3-fpm-trixie-node24'])
 
     def test_installer_renames_and_deletions_select_publication(self):
         path = self.root / 'scripts/build_pie_extension.sh'
         moved = self.root / 'scripts/maintenance.sh'
         path.rename(moved)
         self.commit()
-        self.assertEqual(len(affected_image_tags(self.entries(), self.root, self.base, purpose='publish')), 8)
+        self.assertEqual(len(affected_image_tags(self.entries(), self.root, self.base, purpose='publish')), 16)
         before = self.git('rev-parse', 'HEAD')
         moved.rename(path)
         self.commit()
-        self.assertEqual(len(affected_image_tags(self.entries(), self.root, before, purpose='publish')), 8)
+        self.assertEqual(len(affected_image_tags(self.entries(), self.root, before, purpose='publish')), 16)
         before = self.git('rev-parse', 'HEAD')
         path.unlink()
         self.commit()
-        self.assertEqual(len(affected_image_tags(self.entries(), self.root, before, purpose='publish')), 8)
+        self.assertEqual(len(affected_image_tags(self.entries(), self.root, before, purpose='publish')), 16)
 
     def test_cli_purpose_and_empty_output(self):
         self.change_file('tests/new_test.py')
@@ -181,7 +184,7 @@ class SelectionPurposeTests(RepositoryTests):
         args = [sys.executable, str(script), '--base-ref', self.base, '--out', str(output)]
         result = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(json.loads(output.read_text())['phpimages']), 8)
+        self.assertEqual(len(json.loads(output.read_text())['phpimages']), 16)
         result = subprocess.run(args + ['--purpose', 'publish', '--github-output', str(github_output)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(output.read_text())['phpimages'], [])

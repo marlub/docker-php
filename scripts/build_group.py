@@ -20,7 +20,7 @@ from plan_ci import load_variants, prepare_build_group, run_git
 
 ROOT = Path(__file__).resolve().parent.parent
 DIGEST = re.compile(r"sha256:[a-f0-9]{64}")
-PACKAGE_CHECKS = {"alpine": "tests/test_apk_lock.php"}
+PACKAGE_CHECKS = {"alpine": "tests/test_apk_lock.php", "debian": "tests/test_apt_lock.php"}
 
 
 @dataclass(frozen=True)
