@@ -3,6 +3,7 @@ import re
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from test_images import RepositoryTests
 from plan_ci import (PlanningError, affected_image_tags, create_ci_plan,
@@ -205,6 +206,188 @@ class SelectionPurposeTests(RepositoryTests):
         entry = self.entries()[0]
         self.change_file('future-input.json')
         self.assertTrue(is_candidate_superseded(entry, self.root))
+
+
+class PiePublicationSelectionTests(RepositoryTests):
+    def assert_selection(self, base, test_tags, publish_tags, entries=None):
+        entries = self.entries() if entries is None else entries
+        for purpose, expected in (('test', test_tags), ('publish', publish_tags)):
+            with self.subTest(purpose=purpose):
+                plan = create_ci_plan(entries, self.root, base, purpose=purpose)
+                self.assertEqual({entry['tagMinor'] for entry in plan['phpimages']}, expected)
+                flattened = [entry for group in plan['buildgroups'] for entry in group['variants']]
+                self.assertEqual({entry['tagMinor'] for entry in flattened}, expected)
+
+    def test_patch_minor_major_and_digest_updates_only_skip_publication(self):
+        original = (self.root / 'Dockerfile').read_text()
+        version = re.search(r'ARG PIE_IMAGE="[^"\n]+:(\d+)\.(\d+)\.(\d+)-bin@', original)
+        major, minor, patch_version = map(int, version.groups())
+        original_digest = re.search(r'ARG PIE_IMAGE="[^"\n]+@sha256:([a-f0-9]{64})', original)[1]
+        versions = ((f'{major}.{minor}.{patch_version + 1}', original_digest),
+                    (f'{major}.{minor + 1}.0', 'a' * 64),
+                    (f'{major + 1}.0.0', 'a' * 64), ('.'.join(version.groups()), 'a' * 64))
+        all_tags = {entry['tagMinor'] for entry in self.entries()}
+        for new_version, new_digest in versions:
+            with self.subTest(version=new_version):
+                (self.root / 'Dockerfile').write_text(original)
+                self.change_pie(version=new_version, digest=new_digest)
+                self.commit()
+                self.assert_selection(self.base, all_tags, set())
+
+    def test_mixed_changes_preserve_publication_scope(self):
+        all_tags = {entry['tagMinor'] for entry in self.entries()}
+        cases = (
+            ('node', {tag for tag in all_tags if 'node' in tag}),
+            ('minor', {tag for tag in all_tags if tag.startswith('8.3-')}),
+            ('lock', all_tags),
+            ('composer', all_tags),
+            ('helper', all_tags),
+            ('recipe', all_tags),
+            ('shared', all_tags),
+        )
+        for index, (case, expected) in enumerate(cases):
+            with self.subTest(case=case):
+                before = self.git('rev-parse', 'HEAD')
+                self.change_pie(version=f'1.999.{index}')
+                if case == 'node':
+                    self.change_node()
+                elif case == 'minor':
+                    self.change_arg('8.3', 'REDIS_VERSION', '6.3.99')
+                else:
+                    filename = {'lock': 'build/apk/3.24/amd64.json',
+                                'composer': 'Dockerfile', 'helper': 'scripts/build_pie_extension.sh',
+                                'recipe': 'Dockerfile', 'shared': 'docker-bake.hcl'}[case]
+                    path = self.root / filename
+                    content = path.read_text()
+                    if case == 'composer':
+                        content = re.sub(r'(ARG COMPOSER_IMAGE="[^"\n]+:)\d+\.\d+\.\d+',
+                                         r'\g<1>3.0.0', content)
+                    elif case == 'recipe':
+                        content = content.replace('RUN cp ', 'RUN cp -v ', 1)
+                    else:
+                        content += '\n'
+                    path.write_text(content)
+                self.commit()
+                self.assert_selection(before, all_tags, expected)
+
+    def test_ambiguous_invalid_or_unfamiliar_recipes_do_not_qualify(self):
+        path = self.root / 'Dockerfile'
+        original = path.read_text()
+        entries = self.entries()
+        all_tags = {entry['tagMinor'] for entry in entries}
+        pin_line = r'^ARG PIE_IMAGE=.+$'
+        pin = re.search(pin_line, original, re.MULTILINE)[0]
+
+        def stage_local(text):
+            declaration = re.search(pin_line, text, re.MULTILINE)[0]
+            return text.replace(declaration + '\n', '').replace(
+                'FROM ${PIE_IMAGE} AS pie\n', 'FROM ${PIE_IMAGE} AS pie\n' + declaration + '\n')
+
+        cases = {
+            'invalid digest': lambda text: re.sub(
+                r'(^ARG PIE_IMAGE="[^"\n]+@sha256:)[a-f0-9]{64}', r'\g<1>bad', text, flags=re.MULTILINE),
+            'unpinned': lambda text: re.sub(r'(ARG PIE_IMAGE="[^"\n]+)@sha256:[a-f0-9]{64}', r'\1', text),
+            'duplicate': lambda text: re.sub(pin_line, lambda match: match[0] + '\n' + match[0], text, flags=re.MULTILINE),
+            'indented duplicate': lambda text: text + '\n  ARG PIE_IMAGE="other"\n',
+            'lowercase duplicate': lambda text: text + '\narg PIE_IMAGE="other"\n',
+            'repository': lambda text: text.replace('ghcr.io/php/pie:', 'example.test/php/pie:'),
+            'suffix': lambda text: text.replace('-bin@sha256:', '-other@sha256:', 1),
+            'pin formatting': lambda text: text.replace('ARG PIE_IMAGE=', 'ARG  PIE_IMAGE='),
+            'missing declaration': lambda text: re.sub(pin_line + '\n', '', text, flags=re.MULTILINE),
+            'stage-local declaration': stage_local,
+            'unrecognized PIE stage': lambda text: text.replace('FROM ${PIE_IMAGE} AS pie', 'FROM ${PIE_IMAGE} AS installer'),
+            'unrecognized Node layout': lambda text: text.replace('FROM php AS php-node', 'FROM php AS other'),
+            'extra PIE reference': lambda text: text + '\n# ${PIE_IMAGE}\n',
+        }
+        self.change_pie()
+        updated = path.read_text()
+        self.commit()
+        for case, transform in cases.items():
+            # Also check an already-unfamiliar layout with only its PIE pin changing.
+            histories = (False,) if case in ('repository', 'suffix', 'missing declaration') else (False, True)
+            for invalid_history in histories:
+                with self.subTest(case=case, invalid_history=invalid_history):
+                    path.write_text(transform(original) if invalid_history else original)
+                    before = self.commit()
+                    path.write_text(transform(updated))
+                    self.commit()
+                    # Some invalid recipes cannot be loaded; use the known variant inventory.
+                    self.assert_selection(before, all_tags, all_tags, entries)
+        # Invalid historical inputs must not qualify even when the current recipe is valid.
+        path.write_text(original.replace(pin, pin.replace('@sha256:', '@invalid:')))
+        before = self.commit()
+        path.write_text(updated)
+        self.commit()
+        self.assert_selection(before, all_tags, all_tags)
+
+    def test_missing_added_deleted_and_unreadable_recipes_select_all(self):
+        path = self.root / 'Dockerfile'
+        content = path.read_text()
+        entries = self.entries()
+        all_tags = {entry['tagMinor'] for entry in entries}
+        path.unlink()
+        deleted = self.commit()
+        self.assert_selection(self.base, all_tags, all_tags, entries)
+        path.write_text(content)
+        self.change_pie()
+        self.commit()
+        self.assert_selection(deleted, all_tags, all_tags)
+        with patch('plan_ci._file_at_commit', return_value=None):
+            self.assert_selection(self.base, all_tags, all_tags)
+
+    def test_multicommit_push_manual_selection_and_initial_push(self):
+        self.change_pie()
+        pie_commit = self.commit()
+        self.change_arg('8.4', 'REDIS_VERSION', '6.3.99')
+        self.commit()
+        entries = self.entries()
+        all_tags = {entry['tagMinor'] for entry in entries}
+        minor_tags = {tag for tag in all_tags if tag.startswith('8.4-')}
+        self.assert_selection(self.base, all_tags, minor_tags)
+        self.assert_selection(pie_commit, minor_tags, minor_tags)
+        for purpose in ('test', 'publish'):
+            self.assertEqual(len(create_ci_plan(entries, self.root, purpose=purpose)['phpimages']), 8)
+            self.assertEqual(len(create_ci_plan(entries, self.root, php='8.4', purpose=purpose)['phpimages']), 2)
+            self.assertEqual(len(create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)['phpimages']), 8)
+
+    def test_pie_only_updates_do_not_supersede_candidates_but_mixed_updates_do(self):
+        candidates = self.entries()
+        self.change_pie()
+        self.commit()
+        for entry in candidates:
+            self.assertFalse(is_candidate_superseded(entry, self.root))
+        self.change_node()
+        self.commit()
+        for entry in candidates:
+            self.assertEqual(is_candidate_superseded(entry, self.root), bool(entry['node']))
+        self.change_arg('8.4', 'REDIS_VERSION', '6.3.99')
+        self.commit()
+        for entry in candidates:
+            self.assertEqual(is_candidate_superseded(entry, self.root),
+                             bool(entry['node']) or entry['minor'] == '8.4')
+
+    def test_pie_only_cli_retains_schema_and_emits_empty_publication(self):
+        self.change_pie()
+        self.commit()
+        output = self.root / '.git/matrix.json'
+        github_output = self.root / '.git/github-output'
+        result = subprocess.run(
+            [sys.executable, str(self.root / 'scripts/plan_ci.py'), '--purpose', 'publish',
+             '--base-ref', self.base, '--out', str(output), '--github-output', str(github_output)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(output.read_text())
+        self.assertEqual(set(plan), {'phpimages', 'buildgroups', 'report', 'renovate_changes'})
+        self.assertEqual(plan['phpimages'], [])
+        self.assertEqual(plan['buildgroups'], [])
+        self.assertFalse(plan['renovate_changes'])
+        self.assertEqual(len(plan['report']), 8)
+        self.assertTrue(all(row['state'] == 'Not selected' for row in plan['report']))
+        self.assertIn('has_changes=false\n', github_output.read_text())
+        workflow = (self.root / '.github/workflows/build-test-publish.yml').read_text()
+        self.assertIn("if: needs.select-variants.outputs.has_changes == 'true'", workflow)
+        self.assertIn('python scripts/plan_ci.py --purpose publish --base-ref', workflow)
 
 
 class RenovateChangeDetectionTests(RepositoryTests):

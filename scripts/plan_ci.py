@@ -129,13 +129,44 @@ def _file_at_commit(root: Path, commit: str, path: str) -> str | None:
         return None
 
 
-def _only_node_stages_changed(root: Path, changes: ChangeSet, path: str) -> bool:
+def _normalize_pie_pin(dockerfile: str) -> str | None:
+    """Ignore only a canonical PIE version/digest in a recognized recipe layout."""
+    declarations = re.findall(r"^[ \t]*ARG[ \t]+PIE_IMAGE(?=[= \t]|$)",
+                              dockerfile, re.MULTILINE | re.IGNORECASE)
+    pin = re.search(
+        r'^ARG PIE_IMAGE="(?P<image>(?P<repository>[a-z0-9./_-]+):'
+        r'\d+\.\d+\.\d+(?P<suffix>-[a-z0-9._-]+)?@sha256:[a-f0-9]{64})"$',
+        dockerfile, re.MULTILINE,
+    )
+    first_stage = re.search(r"^FROM ", dockerfile, re.MULTILINE)
+    if (len(declarations) != 1 or pin is None or first_stage is None
+            or pin.end() >= first_stage.start()
+            or len(re.findall(r"^FROM \$\{PIE_IMAGE\} AS pie$", dockerfile, re.MULTILINE)) != 1
+            or dockerfile.count("PIE_IMAGE") != 2
+            or _without_node_stages(dockerfile) is None):
+        return None
+    image = f'{pin["repository"]}:<version>{pin["suffix"] or ""}@sha256:<digest>'
+    return dockerfile[:pin.start("image")] + image + dockerfile[pin.end("image"):]
+
+
+def _recipe_change_scope(
+    root: Path, changes: ChangeSet, path: str, purpose: Purpose,
+) -> Literal["none", "node", "all"]:
     before = _file_at_commit(root, changes.base_commit, path)
     after = _file_at_commit(root, changes.head_commit, path)
     if before is None or after is None:
-        return False
+        return "all"
+    if purpose == "publish":
+        normalized_before = _normalize_pie_pin(before)
+        normalized_after = _normalize_pie_pin(after)
+        if normalized_before is not None and normalized_after is not None:
+            before, after = normalized_before, normalized_after
+            if before == after:
+                return "none"
     shared_before = _without_node_stages(before)
-    return shared_before is not None and shared_before == _without_node_stages(after)
+    if shared_before is not None and shared_before == _without_node_stages(after):
+        return "node"
+    return "all"
 
 
 def _affected_image_tags(
@@ -158,8 +189,9 @@ def _affected_image_tags(
             matching = [variant for variant in variants if variant["distribution"] == "alpine"
                         and variant["distribution_release"] == apk_lock[1]]
         elif path in {variant["dockerfile"] for variant in variants}:
+            scope = _recipe_change_scope(root, changes, path, purpose)
             matching = [variant for variant in variants if variant["dockerfile"] == path
-                        and (variant["node"] or not _only_node_stages_changed(root, changes, path))]
+                        and (scope == "all" or (scope == "node" and variant["node"]))]
         else:
             matching = variants
         affected.update(variant["tagMinor"] for variant in matching)
@@ -246,8 +278,12 @@ def is_candidate_superseded(variant: ImageVariant, root: Path) -> bool:
     if not re.fullmatch(r"[a-f0-9]{40}", variant["source_ref"]):
         raise PlanningError("Invalid candidate source commit")
     run_git(root, "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    # Retain other recipes' identities so their changes are not treated as unknown
+    # shared inputs. Keep the candidate itself even if the local inventory changed.
+    variants = [variant] + [entry for entry in load_variants(root)
+                            if entry["tagMinor"] != variant["tagMinor"]]
     tags = affected_image_tags(
-        [variant], root, variant["source_ref"], "refs/remotes/origin/main", purpose="publish"
+        variants, root, variant["source_ref"], "refs/remotes/origin/main", purpose="publish"
     )
     return variant["tagMinor"] in tags
 

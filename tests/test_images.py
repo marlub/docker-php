@@ -73,6 +73,14 @@ class RepositoryTests(unittest.TestCase):
         path = self.root / 'Dockerfile'
         path.write_text(re.sub(r'node:24\.\d+\.\d+-', 'node:24.999.0-', path.read_text()))
 
+    def change_pie(self, version='1.999.0', digest='a' * 64, recipe='Dockerfile'):
+        path = self.root / recipe
+        path.write_text(re.sub(
+            r'(ARG PIE_IMAGE="[^"\n]+:)\d+\.\d+\.\d+(-bin@sha256:)[a-f0-9]{64}',
+            lambda match: match[1] + version + match[2] + digest,
+            path.read_text(),
+        ))
+
     def affected(self, change):
         before = self.git('rev-parse', 'HEAD')
         change()

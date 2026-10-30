@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from test_images import RepositoryTests
 from image_config import ConfigurationError, variant_order
-from plan_ci import create_ci_plan, prepare_build_group, PlanningError
+from plan_ci import create_ci_plan, is_candidate_superseded, prepare_build_group, PlanningError
 from variant_fixtures import add_family_variants
 
 
@@ -113,6 +113,40 @@ class FamilyConfigurationTests(RepositoryTests):
             entries = refresh_apk_locks.selected_base_images('8.4')
         self.assertEqual(len(entries), 1)
         self.assertIn('-alpine3.24@', entries[0]['image'])
+
+    def test_pie_publication_exemption_is_independent_for_each_recipe(self):
+        entries = self.entries()
+        for recipe in ('Dockerfile', 'Dockerfile.debian'):
+            with self.subTest(recipe=recipe):
+                before = self.git('rev-parse', 'HEAD')
+                self.change_pie(recipe=recipe)
+                self.commit()
+                expected = {entry['tagMinor'] for entry in entries if entry['dockerfile'] == recipe}
+                tested = create_ci_plan(self.entries(), self.root, before)
+                self.assertEqual({entry['tagMinor'] for entry in tested['phpimages']}, expected)
+                self.assertEqual(create_ci_plan(self.entries(), self.root, before, purpose='publish')['phpimages'], [])
+                for entry in entries:
+                    self.assertFalse(is_candidate_superseded(entry, self.root), entry['tagMinor'])
+
+        # A PIE-only update to one recipe must not hide a real change to the other.
+        before = self.git('rev-parse', 'HEAD')
+        self.change_pie(version='2.0.0', recipe='Dockerfile.debian')
+        self.change_node()
+        self.commit()
+        published = create_ci_plan(self.entries(), self.root, before, purpose='publish')
+        self.assertEqual({entry['tagMinor'] for entry in published['phpimages']},
+                         {entry['tagMinor'] for entry in entries
+                          if entry['dockerfile'] == 'Dockerfile' and entry['node']})
+        # PIE plus Node changes within a recipe retain all configured Node majors.
+        before = self.git('rev-parse', 'HEAD')
+        self.change_pie(version='2.0.0')
+        path = self.root / 'Dockerfile'
+        path.write_text(path.read_text().replace('node:24.999.0-', 'node:24.999.1-'))
+        self.commit()
+        published = create_ci_plan(self.entries(), self.root, before, purpose='publish')
+        self.assertEqual({entry['tagMinor'] for entry in published['phpimages']},
+                         {entry['tagMinor'] for entry in entries
+                          if entry['dockerfile'] == 'Dockerfile' and entry['node']})
 
     def test_renovate_extracts_target_specific_pins_and_keeps_every_major_explicit(self):
         config = json.loads((self.root / 'renovate.json').read_text())
