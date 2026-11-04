@@ -2,8 +2,8 @@
 # check=skip=InvalidDefaultArgInFrom
 ARG PHP_BASE_IMAGE
 ARG NODE_BASE_IMAGE="node:24.22.2-alpine3.24@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
-ARG PIE_IMAGE="ghcr.io/php/pie:1.5.3-bin@sha256:9d3e6d9dafa5ae8cf034489260e206a5aa1b488b29c0ddaea9149826d9e32f52"
-ARG COMPOSER_IMAGE="ghcr.io/composer/docker:2.11.0-bin@sha256:003932f2656d41d29a5037cb6478f0bba93ed3cd4bd4e86e5ccfed26217044c8"
+ARG PIE_IMAGE="ghcr.io/php/pie:1.5.5-bin@sha256:3fca03c16df842d02b654dc382db3756058d9c128064f57cace14f8728779ce9"
+ARG COMPOSER_IMAGE="ghcr.io/composer/docker:2.11.1-bin@sha256:56a1b0a72bacd78079e3fa49a49e7bf58326365753415c99385ea2b08bded0a5"
 
 FROM ${PIE_IMAGE} AS pie
 FROM ${COMPOSER_IMAGE} AS composer
