@@ -1,5 +1,5 @@
 # PHP-FPM Docker images with optional Node.js
-Docker images based on the official PHP-FPM Alpine images, with
+Docker images based on the official PHP-FPM Alpine and Debian Trixie images, with
 preinstalled extensions you can enable through environment variables.
 
 Includes database drivers, Redis, AMQP, image processing with GD,
@@ -15,10 +15,10 @@ Images support `linux/amd64` and `linux/arm64`. The default `php.ini` is based o
 
 | ⚙️ PHP version | ✨ Image variants |
 | -------------- | ------------------ |
-| 8.5 | ghcr.io/marlub/php:8.5-fpm-alpine<br>ghcr.io/marlub/php:8.5-fpm-alpine-node24 |
-| 8.4 | ghcr.io/marlub/php:8.4-fpm-alpine<br>ghcr.io/marlub/php:8.4-fpm-alpine-node24 |
-| 8.3 | ghcr.io/marlub/php:8.3-fpm-alpine<br>ghcr.io/marlub/php:8.3-fpm-alpine-node24 |
-| 8.2 | ghcr.io/marlub/php:8.2-fpm-alpine<br>ghcr.io/marlub/php:8.2-fpm-alpine-node24 |
+| 8.5 | ghcr.io/marlub/php:8.5-fpm-alpine<br>ghcr.io/marlub/php:8.5-fpm-alpine-node24<br>ghcr.io/marlub/php:8.5-fpm-trixie<br>ghcr.io/marlub/php:8.5-fpm-trixie-node24 |
+| 8.4 | ghcr.io/marlub/php:8.4-fpm-alpine<br>ghcr.io/marlub/php:8.4-fpm-alpine-node24<br>ghcr.io/marlub/php:8.4-fpm-trixie<br>ghcr.io/marlub/php:8.4-fpm-trixie-node24 |
+| 8.3 | ghcr.io/marlub/php:8.3-fpm-alpine<br>ghcr.io/marlub/php:8.3-fpm-alpine-node24<br>ghcr.io/marlub/php:8.3-fpm-trixie<br>ghcr.io/marlub/php:8.3-fpm-trixie-node24 |
+| 8.2 | ghcr.io/marlub/php:8.2-fpm-alpine<br>ghcr.io/marlub/php:8.2-fpm-alpine-node24<br>ghcr.io/marlub/php:8.2-fpm-trixie<br>ghcr.io/marlub/php:8.2-fpm-trixie-node24 |
 
 ## 🧬 Extensions added on top of the official PHP images
 ```

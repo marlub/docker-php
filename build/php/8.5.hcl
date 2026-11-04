@@ -26,23 +26,43 @@ variable "PHP_8_5" {
 }
 
 group "ci-8-5" {
-  targets = ["php-8-5", "php-8-5-node24"]
+  targets = ["php-8-5-alpine", "php-8-5-alpine-node24", "php-8-5-trixie", "php-8-5-trixie-node24"]
 }
 
-target "_php-8-5" {
-  labels = { "io.github.marlub.docker-php.base-target" = "php-8-5" }
+target "_php-8-5-alpine" {
+  labels = { "io.github.marlub.docker-php.base-target" = "php-8-5-alpine" }
   inherits = ["_common"]
   args = extension_args(PHP_8_5)
 }
 
-target "php-8-5" {
-  inherits = ["_php-8-5"]
+target "php-8-5-alpine" {
+  inherits = ["_php-8-5-alpine"]
   target = "php"
   tags = ["docker-php:8.5-fpm-alpine"]
 }
 
-target "php-8-5-node24" {
-  inherits = ["_php-8-5"]
+target "php-8-5-alpine-node24" {
+  inherits = ["_php-8-5-alpine"]
   target = "php-node"
   tags = ["docker-php:8.5-fpm-alpine-node24"]
+}
+
+target "_php-8-5-trixie" {
+  inherits = ["_common", "_debian"]
+  labels = { "io.github.marlub.docker-php.base-target" = "php-8-5-trixie" }
+  args = extension_args(merge(PHP_8_5, {
+    PHP_BASE_IMAGE = "php:8.5.12-fpm-trixie@sha256:da5d8e27ec238adc0804fd4194f98e59477db7116690d275b76679c1b84c813f"
+  }))
+}
+
+target "php-8-5-trixie" {
+  inherits = ["_php-8-5-trixie"]
+  target = "php"
+  tags = ["docker-php:8.5-fpm-trixie"]
+}
+
+target "php-8-5-trixie-node24" {
+  inherits = ["_php-8-5-trixie"]
+  target = "php-node"
+  tags = ["docker-php:8.5-fpm-trixie-node24"]
 }

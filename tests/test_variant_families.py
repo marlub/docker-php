@@ -19,26 +19,26 @@ class FamilyConfigurationTests(RepositoryTests):
     def family(self, base):
         return [entry for entry in self.entries() if entry['base_target'] == base]
 
-    def test_discover_two_distributions_with_two_node_majors_each(self):
+    def test_discover_additional_releases_and_node_majors(self):
         entries = self.entries()
-        self.assertEqual(len(entries), 12)
+        self.assertEqual(len(entries), 20)
         plan = create_ci_plan(entries, self.root, php='8.4')
-        self.assertEqual(len(plan['phpimages']), 6)
-        self.assertEqual([g['id'] for g in plan['buildgroups']], ['php-8-4', 'php-8-4-bookworm'])
+        self.assertEqual(len(plan['phpimages']), 8)
+        self.assertEqual([g['id'] for g in plan['buildgroups']], ['php-8-4-alpine', 'php-8-4-bookworm', 'php-8-4-trixie'])
         for group in plan['buildgroups']:
-            self.assertEqual([v['node'] for v in group['variants']], ['', '24', '26'])
+            self.assertEqual([v['node'] for v in group['variants']], (['', '24'] if group['id'].endswith('trixie') else ['', '24', '26']))
             self.assertEqual({v['base_target'] for v in group['variants']}, {group['id']})
             self.assertEqual({(v['distribution'], v['distribution_release']) for v in group['variants']},
                              {(group['distribution'], group['distribution_release'])})
         self.assertEqual(plan['buildgroups'][0]['distribution'], 'alpine')
         self.assertEqual(plan['buildgroups'][1]['distribution'], 'debian')
         self.assertEqual(plan['buildgroups'][1]['distribution_release'], 'bookworm')
-        self.assertEqual(len({v[key] for v in entries for key in ('tagMinor', 'tagPatch')}), 24)
+        self.assertEqual(len({v[key] for v in entries for key in ('tagMinor', 'tagPatch')}), 40)
         self.assertEqual(self.family('php-8-4-bookworm')[1]['node_image'].split(':')[1].split('@')[0],
                          '24.1.0-bookworm-slim')
 
     def test_subsets_order_and_validation_do_not_add_plain_or_other_nodes(self):
-        family = self.family('php-8-4')
+        family = self.family('php-8-4-alpine')
         for selected in (family, family[:1], family[1:], family[2:]):
             with self.subTest(selected=[v['node'] for v in selected]):
                 plan = create_ci_plan(selected[::-1], self.root)
@@ -53,7 +53,7 @@ class FamilyConfigurationTests(RepositoryTests):
     def test_node_majors_sort_numerically(self):
         path = self.root / 'build/php/8.4.hcl'
         path.write_text(path.read_text().replace('node26', 'node100').replace('node:26.1.0', 'node:100.1.0'))
-        family = self.family('php-8-4')
+        family = self.family('php-8-4-alpine')
         self.assertEqual([e['node'] for e in prepare_build_group(family[::-1], self.entries())], ['', '24', '100'])
 
     def test_bad_shared_arguments_recipe_node_pins_and_tags_are_rejected(self):
@@ -65,7 +65,7 @@ class FamilyConfigurationTests(RepositoryTests):
             ('NODE_BASE_IMAGE = "node:26.1.0-alpine3.24', 'NODE_BASE_IMAGE = "node:24.1.0-alpine3.24'),
             ('node:26.1.0-alpine3.24@sha256:' + '1' * 64, 'node:latest'),
             ('tags = ["docker-php:8.4-fpm-bookworm"]', 'tags = ["docker-php:8.4-fpm-alpine"]'),
-            ('target "php-8-4-node26" {', 'target "php-8-4-node26" {\n  dockerfile = "Dockerfile.debian"'),
+            ('target "php-8-4-alpine-node26" {', 'target "php-8-4-alpine-node26" {\n  dockerfile = "Dockerfile.fixture"'),
         ]
         for before, after in replacements:
             with self.subTest(after=after):
@@ -76,7 +76,7 @@ class FamilyConfigurationTests(RepositoryTests):
 
     def test_missing_canonical_target_is_rejected(self):
         path = self.root / 'build/php/8.4.hcl'
-        path.write_text(path.read_text().replace('targets = ["php-8-4", ', 'targets = [', 1))
+        path.write_text(path.read_text().replace('"php-8-4-alpine", ', '', 1))
         with self.assertRaises(ConfigurationError):
             self.entries()
 
@@ -94,7 +94,7 @@ class FamilyConfigurationTests(RepositoryTests):
         self.assertEqual(len(selected['phpimages']), 5)
         self.assertTrue(all(v['node'] and v['distribution'] == 'alpine' for v in selected['phpimages']))
         before = self.git('rev-parse', 'HEAD')
-        recipe = self.root / 'Dockerfile.debian'
+        recipe = self.root / 'Dockerfile.fixture'
         recipe.write_text(recipe.read_text().replace('RUN cp ', 'RUN cp -v ', 1))
         self.commit()
         selected = create_ci_plan(self.entries(), self.root, before)
@@ -104,7 +104,7 @@ class FamilyConfigurationTests(RepositoryTests):
         self.change_arg('8.4', 'REDIS_VERSION', '6.3.99')
         self.commit()
         selected = create_ci_plan(self.entries(), self.root, before)
-        self.assertEqual(len(selected['phpimages']), 6)
+        self.assertEqual(len(selected['phpimages']), 8)
 
     def test_apk_refresh_ignores_debian_and_does_not_need_locks(self):
         import refresh_apk_locks

@@ -26,6 +26,7 @@ on:
       - scripts/plan_ci.py
       - scripts/image_config.py
       - scripts/refresh_apk_locks.py
+      - scripts/refresh_apt_locks.py
       - .github/workflows/build-test.yml
 
 permissions:

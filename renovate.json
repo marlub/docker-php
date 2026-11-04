@@ -131,6 +131,38 @@
         "apk"
       ],
       "groupName": "Alpine 3.24 packages"
+    },
+    {
+      "matchDatasources": [
+        "deb"
+      ],
+      "groupName": "Debian trixie packages"
+    },
+    {
+      "matchDatasources": [
+        "deb"
+      ],
+      "matchFileNames": [
+        "build/apt/trixie/amd64.json"
+      ],
+      "registryUrls": [
+        "https://deb.debian.org/debian?suite=trixie&components=main&binaryArch=amd64",
+        "https://deb.debian.org/debian?suite=trixie-updates&components=main&binaryArch=amd64",
+        "https://deb.debian.org/debian-security?suite=trixie-security&components=main&binaryArch=amd64"
+      ]
+    },
+    {
+      "matchDatasources": [
+        "deb"
+      ],
+      "matchFileNames": [
+        "build/apt/trixie/arm64.json"
+      ],
+      "registryUrls": [
+        "https://deb.debian.org/debian?suite=trixie&components=main&binaryArch=arm64",
+        "https://deb.debian.org/debian?suite=trixie-updates&components=main&binaryArch=arm64",
+        "https://deb.debian.org/debian-security?suite=trixie-security&components=main&binaryArch=arm64"
+      ]
     }
   ],
   "customManagers": [
@@ -226,6 +258,28 @@
       ],
       "datasourceTemplate": "docker",
       "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/apt\\/trixie\\/amd64\\.json$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-z0-9][a-z0-9+.-]+)\": \"(?<currentValue>[0-9][a-zA-Z0-9.+:~\\-]*)\""
+      ],
+      "datasourceTemplate": "deb",
+      "versioningTemplate": "deb"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build\\/apt\\/trixie\\/arm64\\.json$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-z0-9][a-z0-9+.-]+)\": \"(?<currentValue>[0-9][a-zA-Z0-9.+:~\\-]*)\""
+      ],
+      "datasourceTemplate": "deb",
+      "versioningTemplate": "deb"
     }
   ]
 }

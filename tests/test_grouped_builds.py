@@ -76,12 +76,12 @@ class GroupedBuildTests(RepositoryTests):
         super().setUp()
         add_family_variants(self.root)
         self.commit()
-        self.family = [v for v in self.entries() if v['base_target'] == 'php-8-4']
+        self.family = [v for v in self.entries() if v['base_target'] == 'php-8-4-alpine']
         self.directory = self.root / '.git/build-results'
         self.directory.mkdir()
 
     def request(self, *, variants=None, forced=False):
-        return {'group_id': 'php-8-4', 'source_ref': self.family[0]['source_ref'], 'arch': 'amd64', 'run_attempt': '2',
+        return {'group_id': 'php-8-4-alpine', 'source_ref': self.family[0]['source_ref'], 'arch': 'amd64', 'run_attempt': '2',
                 'variants': self.family if variants is None else variants, 'cache': {'image': 'example.test/cache', 'scope': 'main', 'merged_prs': [42]},
                 'builder': 'same-builder', 'publish': True, 'no_cache': forced, 'image': 'example.test/php'}
 
@@ -171,15 +171,15 @@ class GroupedBuildTests(RepositoryTests):
         self.assertEqual(bundle['results'][self.family[2]['tagMinor']]['status'], 'not-run')
         self.assertNotIn('digest', bundle['results'][second])
 
-    def test_debian_without_package_backend_fails_explicitly_before_build(self):
-        family = [v for v in self.entries() if v['distribution'] == 'debian']
+    def test_unknown_distribution_without_package_backend_fails_explicitly_before_build(self):
+        family = [dict(v, distribution='unknown') for v in self.family]
         request = self.request(variants=family)
         request['group_id'] = family[0]['base_target']
         commands = FakeCommands(self.root)
         bundle = self.run_controller(request, commands)
         self.assertFalse(commands.builds)
         for result in bundle['results'].values():
-            self.assertIn('Unsupported package-check backend: debian', result['error'])
+            self.assertIn('Unsupported package-check backend: unknown', result['error'])
             self.assertEqual(result['status'], 'failure')
             self.assertNotIn('digest', result)
 

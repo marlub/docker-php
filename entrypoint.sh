@@ -29,7 +29,12 @@ if [ -z "$APP_USER" ]; then
     if [ -f /etc/alpine-release ]; then
         addgroup -g "$APP_GID" app && adduser -D -u "$APP_UID" app -G app
     else
-        groupadd -g "$APP_GID" app && useradd -u "$APP_UID" app -g app
+        APP_GROUP=$(getent group "$APP_GID" | cut -d : -f 1)
+        if [ -z "$APP_GROUP" ]; then
+            groupadd -g "$APP_GID" app
+            APP_GROUP=app
+        fi
+        useradd -u "$APP_UID" app -g "$APP_GROUP"
     fi
 
     APP_USER=app
@@ -37,5 +42,9 @@ fi
 
 # Fix access rights for stdout and stderr
 chown "$APP_USER" /proc/self/fd/1 /proc/self/fd/2
+
+if [ ! -f /etc/alpine-release ]; then
+    exec runuser -u "$APP_USER" -- /usr/local/bin/docker-php-original-entrypoint "$@"
+fi
 
 exec su "$APP_USER" /usr/local/bin/docker-php-original-entrypoint -- "$@"

@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 from build_group import cache_policy
+from image_config import load_image_variants
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,13 +87,13 @@ class CacheRoutingTests(unittest.TestCase):
 
     def test_every_variant_architecture_and_pr_has_a_distinct_write_reference(self):
         refs = set()
-        for minor in ('8.2', '8.3', '8.4', '8.5'):
-            for node in ('', '-node24'):
-                for arch in ('amd64', 'arm64'):
-                    for pr in ('41', '42'):
-                        _, settings = self.configure(TAG_MINOR=f'{minor}-fpm-alpine{node}', ARCH=arch, PR_NUMBER=pr)
-                        refs.add(settings[-1])
-        self.assertEqual(len(refs), 32)
+        variants = load_image_variants(ROOT, '')
+        for entry in variants:
+            for arch in ('amd64', 'arm64'):
+                for pr in ('41', '42'):
+                    _, settings = self.configure(TAG_MINOR=entry['tagMinor'], ARCH=arch, PR_NUMBER=pr)
+                    refs.add(settings[-1])
+        self.assertEqual(len(refs), len(variants) * 4)
 
     def test_cache_address_is_independent_of_published_image(self):
         output, settings = self.configure(CACHE_IMAGE='example.test/team/cache')
@@ -122,9 +123,9 @@ class CacheRoutingTests(unittest.TestCase):
                         settings.append('*.output+=type=oci,dest=/tmp/cache-routing-test.tar')
                     for setting in settings:
                         command += ['--set', setting]
-                    result = subprocess.run(command + ['php-8-4'], cwd=ROOT, capture_output=True, text=True)
+                    result = subprocess.run(command + ['php-8-4-alpine'], cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    target = json.loads(result.stdout)['target']['php-8-4']
+                    target = json.loads(result.stdout)['target']['php-8-4-alpine']
                     scope = 'main' if publish else 'pr-42'
                     self.assertEqual(target['platforms'], [f'linux/{arch}'])
                     self.assertTrue(target['no-cache'])
