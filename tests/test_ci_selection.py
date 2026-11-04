@@ -229,7 +229,7 @@ class PiePublicationSelectionTests(RepositoryTests):
         versions = ((f'{major}.{minor}.{patch_version + 1}', original_digest),
                     (f'{major}.{minor + 1}.0', 'a' * 64),
                     (f'{major + 1}.0.0', 'a' * 64), ('.'.join(version.groups()), 'a' * 64))
-        all_tags = {entry['tagMinor'] for entry in self.entries()}
+        all_tags = {entry['tagMinor'] for entry in self.entries() if entry['dockerfile'] == 'Dockerfile'}
         for new_version, new_digest in versions:
             with self.subTest(version=new_version):
                 (self.root / 'Dockerfile').write_text(original)
@@ -239,13 +239,14 @@ class PiePublicationSelectionTests(RepositoryTests):
 
     def test_mixed_changes_preserve_publication_scope(self):
         all_tags = {entry['tagMinor'] for entry in self.entries()}
+        alpine_tags = {entry['tagMinor'] for entry in self.entries() if entry['dockerfile'] == 'Dockerfile'}
         cases = (
-            ('node', {tag for tag in all_tags if 'node' in tag}),
+            ('node', {tag for tag in alpine_tags if 'node' in tag}),
             ('minor', {tag for tag in all_tags if tag.startswith('8.3-')}),
-            ('lock', all_tags),
-            ('composer', all_tags),
+            ('lock', alpine_tags),
+            ('composer', alpine_tags),
             ('helper', all_tags),
-            ('recipe', all_tags),
+            ('recipe', alpine_tags),
             ('shared', all_tags),
         )
         for index, (case, expected) in enumerate(cases):
@@ -271,13 +272,14 @@ class PiePublicationSelectionTests(RepositoryTests):
                         content += '\n'
                     path.write_text(content)
                 self.commit()
-                self.assert_selection(before, all_tags, expected)
+                tested = alpine_tags | expected
+                self.assert_selection(before, tested, expected)
 
     def test_ambiguous_invalid_or_unfamiliar_recipes_do_not_qualify(self):
         path = self.root / 'Dockerfile'
         original = path.read_text()
         entries = self.entries()
-        all_tags = {entry['tagMinor'] for entry in entries}
+        all_tags = {entry['tagMinor'] for entry in entries if entry['dockerfile'] == 'Dockerfile'}
         pin_line = r'^ARG PIE_IMAGE=.+$'
         pin = re.search(pin_line, original, re.MULTILINE)[0]
 
@@ -327,7 +329,7 @@ class PiePublicationSelectionTests(RepositoryTests):
         path = self.root / 'Dockerfile'
         content = path.read_text()
         entries = self.entries()
-        all_tags = {entry['tagMinor'] for entry in entries}
+        all_tags = {entry['tagMinor'] for entry in entries if entry['dockerfile'] == 'Dockerfile'}
         path.unlink()
         deleted = self.commit()
         self.assert_selection(self.base, all_tags, all_tags, entries)
@@ -346,12 +348,13 @@ class PiePublicationSelectionTests(RepositoryTests):
         entries = self.entries()
         all_tags = {entry['tagMinor'] for entry in entries}
         minor_tags = {tag for tag in all_tags if tag.startswith('8.4-')}
-        self.assert_selection(self.base, all_tags, minor_tags)
+        alpine_tags = {entry['tagMinor'] for entry in entries if entry['dockerfile'] == 'Dockerfile'}
+        self.assert_selection(self.base, alpine_tags | minor_tags, minor_tags)
         self.assert_selection(pie_commit, minor_tags, minor_tags)
         for purpose in ('test', 'publish'):
-            self.assertEqual(len(create_ci_plan(entries, self.root, purpose=purpose)['phpimages']), 8)
-            self.assertEqual(len(create_ci_plan(entries, self.root, php='8.4', purpose=purpose)['phpimages']), 2)
-            self.assertEqual(len(create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)['phpimages']), 8)
+            self.assertEqual(len(create_ci_plan(entries, self.root, purpose=purpose)['phpimages']), 16)
+            self.assertEqual(len(create_ci_plan(entries, self.root, php='8.4', purpose=purpose)['phpimages']), 4)
+            self.assertEqual(len(create_ci_plan(entries, self.root, '0' * 40, purpose=purpose)['phpimages']), 16)
 
     def test_pie_only_updates_do_not_supersede_candidates_but_mixed_updates_do(self):
         candidates = self.entries()
@@ -362,12 +365,13 @@ class PiePublicationSelectionTests(RepositoryTests):
         self.change_node()
         self.commit()
         for entry in candidates:
-            self.assertEqual(is_candidate_superseded(entry, self.root), bool(entry['node']))
+            self.assertEqual(is_candidate_superseded(entry, self.root),
+                             bool(entry['node']) and entry['dockerfile'] == 'Dockerfile')
         self.change_arg('8.4', 'REDIS_VERSION', '6.3.99')
         self.commit()
         for entry in candidates:
             self.assertEqual(is_candidate_superseded(entry, self.root),
-                             bool(entry['node']) or entry['minor'] == '8.4')
+                             (bool(entry['node']) and entry['dockerfile'] == 'Dockerfile') or entry['minor'] == '8.4')
 
     def test_pie_only_cli_retains_schema_and_emits_empty_publication(self):
         self.change_pie()
@@ -385,7 +389,7 @@ class PiePublicationSelectionTests(RepositoryTests):
         self.assertEqual(plan['phpimages'], [])
         self.assertEqual(plan['buildgroups'], [])
         self.assertFalse(plan['renovate_changes'])
-        self.assertEqual(len(plan['report']), 8)
+        self.assertEqual(len(plan['report']), 16)
         self.assertTrue(all(row['state'] == 'Not selected' for row in plan['report']))
         self.assertIn('has_changes=false\n', github_output.read_text())
         workflow = (self.root / '.github/workflows/build-test-publish.yml').read_text()
