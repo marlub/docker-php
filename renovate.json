@@ -127,24 +127,40 @@
       "enabled": false
     },
     {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
       "matchDatasources": [
         "apk"
       ],
-      "groupName": "Alpine 3.24 packages"
-    },
-    {
-      "matchDatasources": [
-        "deb"
+      "matchFileNames": [
+        "build/apk/3.24/amd64.json"
       ],
-      "groupName": "Debian trixie packages"
+      "groupName": "Alpine 3.24 packages",
+      "registryUrls": [
+        "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=x86_64"
+      ]
     },
     {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
+      "matchDatasources": [
+        "apk"
+      ],
+      "matchFileNames": [
+        "build/apk/3.24/arm64.json"
+      ],
+      "groupName": "Alpine 3.24 packages",
+      "registryUrls": [
+        "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=aarch64"
+      ]
+    },
+    {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
       "matchDatasources": [
         "deb"
       ],
       "matchFileNames": [
         "build/apt/trixie/amd64.json"
       ],
+      "groupName": "Debian trixie packages",
       "registryUrls": [
         "https://deb.debian.org/debian?suite=trixie&components=main&binaryArch=amd64",
         "https://deb.debian.org/debian?suite=trixie-updates&components=main&binaryArch=amd64",
@@ -152,12 +168,14 @@
       ]
     },
     {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
       "matchDatasources": [
         "deb"
       ],
       "matchFileNames": [
         "build/apt/trixie/arm64.json"
       ],
+      "groupName": "Debian trixie packages",
       "registryUrls": [
         "https://deb.debian.org/debian?suite=trixie&components=main&binaryArch=arm64",
         "https://deb.debian.org/debian?suite=trixie-updates&components=main&binaryArch=arm64",
@@ -203,30 +221,6 @@
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "/^build\\/apk\\/3\\.24\\/amd64\\.json$/"
-      ],
-      "matchStrings": [
-        "\"(?<depName>[a-zA-Z0-9+_.-]+)\": \"(?<currentValue>[^\"]+-r[0-9]+)\""
-      ],
-      "datasourceTemplate": "apk",
-      "versioningTemplate": "apk",
-      "registryUrlTemplate": "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=x86_64"
-    },
-    {
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/^build\\/apk\\/3\\.24\\/arm64\\.json$/"
-      ],
-      "matchStrings": [
-        "\"(?<depName>[a-zA-Z0-9+_.-]+)\": \"(?<currentValue>[^\"]+-r[0-9]+)\""
-      ],
-      "datasourceTemplate": "apk",
-      "versioningTemplate": "apk",
-      "registryUrlTemplate": "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=aarch64"
-    },
-    {
-      "customType": "regex",
-      "managerFilePatterns": [
         "/^\\.github\\/workflows\\/template-renovate\\.yml$/"
       ],
       "matchStrings": [
@@ -260,23 +254,49 @@
       "versioningTemplate": "docker"
     },
     {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^build\\/apt\\/trixie\\/amd64\\.json$/"
+        "/^build/apk/3\\.24/amd64\\.json$/"
       ],
       "matchStrings": [
-        "\"(?<depName>[a-z0-9][a-z0-9+.-]+)\": \"(?<currentValue>[0-9][a-zA-Z0-9.+:~\\-]*)\""
+        "\"(?<depName>[a-zA-Z0-9+_.-]+)\": \"(?<currentValue>[^\"\\n]+-r[0-9]+)\""
+      ],
+      "datasourceTemplate": "apk",
+      "versioningTemplate": "apk"
+    },
+    {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build/apk/3\\.24/arm64\\.json$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-zA-Z0-9+_.-]+)\": \"(?<currentValue>[^\"\\n]+-r[0-9]+)\""
+      ],
+      "datasourceTemplate": "apk",
+      "versioningTemplate": "apk"
+    },
+    {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^build/apt/trixie/amd64\\.json$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-z0-9][a-z0-9+.-]*)\": \"(?<currentValue>[0-9][a-zA-Z0-9.+:~\\-]*)\""
       ],
       "datasourceTemplate": "deb",
       "versioningTemplate": "deb"
     },
     {
+      "description": "Generated OS packages: scripts/sync_renovate_os.py",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^build\\/apt\\/trixie\\/arm64\\.json$/"
+        "/^build/apt/trixie/arm64\\.json$/"
       ],
       "matchStrings": [
-        "\"(?<depName>[a-z0-9][a-z0-9+.-]+)\": \"(?<currentValue>[0-9][a-zA-Z0-9.+:~\\-]*)\""
+        "\"(?<depName>[a-z0-9][a-z0-9+.-]*)\": \"(?<currentValue>[0-9][a-zA-Z0-9.+:~\\-]*)\""
       ],
       "datasourceTemplate": "deb",
       "versioningTemplate": "deb"

@@ -92,9 +92,9 @@ class SelectionTests(RepositoryTests):
     def test_sixteen_variants_and_existing_tags(self):
         entries = self.entries()
         self.assertEqual(len(entries), 16)
-        self.assertEqual(entries[0]['tagMinor'], '8.2-fpm-alpine')
+        self.assertEqual(entries[0]['tagMinor'], '8.2-fpm-alpine3.24')
         self.assertEqual(entries[-1]['tagMinor'], '8.5-fpm-trixie-node24')
-        self.assertEqual(entries[0]['tagPatch'], entries[0]['php_version'] + '-fpm-alpine')
+        self.assertEqual(entries[0]['tagPatch'], entries[0]['php_version'] + '-fpm-alpine3.24')
         self.assertNotIn('opcache', entries[-1]['extensions'].split())
         self.assertEqual(entries[0]['source_ref'], self.base)
         self.assertEqual(entries[0]['bake_target'], 'php-8-2-alpine')
@@ -389,8 +389,8 @@ class PublicationStepTests(unittest.TestCase):
             (self.root / (arch + '.json')).write_text(json.dumps(config))
         self.manifest = {'digest': digest('index'), 'manifests': [
             {'platform': {'os': 'linux', 'architecture': arch}, 'digest': value} for arch, value in self.digests.items()]}
-        for key in ('tagMinor', 'tagPatch'):
-            (self.root / (self.entry[key] + '.json')).write_text(json.dumps(self.manifest))
+        for tag in self.entry['publishTags']:
+            (self.root / (tag + '.json')).write_text(json.dumps(self.manifest))
         docker = self.root / 'bin/docker'
         docker.write_text("""#!/usr/bin/env python3
 import json, os, sys
@@ -425,6 +425,9 @@ print((root / (name + '.json')).read_text())
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [json.loads(line) for line in (self.root / 'calls').read_text().splitlines()]
         create = next(call for call in calls if call[2] == 'create')
+        self.assertEqual(create[3:-2], [part for tag in self.entry['publishTags'] for part in ('--tag', IMAGE + ':' + tag)])
+        self.assertEqual([call[3] for call in calls if call[2] == 'inspect' and '@' not in call[3]],
+                         [IMAGE + ':' + tag for tag in self.entry['publishTags']])
         self.assertEqual(create[-2:], [IMAGE + '@' + self.digests[arch] for arch in ('amd64', 'arm64')])
         self.assertNotIn('build', create)
 
@@ -434,8 +437,10 @@ print((root / (name + '.json')).read_text())
         for value in ('invalid', original + original):
             path.write_text(value)
             self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
+            self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
         path.unlink()
         self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
+        self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
 
     def test_candidate_identity_and_registry_errors_propagate(self):
         path = self.root / 'arm64.json'
@@ -447,8 +452,14 @@ print((root / (name + '.json')).read_text())
         self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
 
     def test_missing_duplicate_extra_and_wrong_manifest_children_fail(self):
-        path = self.root / (self.entry['tagPatch'] + '.json')
-        for kind in ('missing', 'duplicate', 'extra', 'digest', 'index', 'index format', 'malformed'):
+        for tag in self.entry['publishTags']:
+            for kind in ('missing', 'duplicate', 'extra', 'digest', 'index', 'index format', 'malformed'):
+                with self.subTest(tag=tag, kind=kind):
+                    self.check_bad_manifest(tag, kind)
+
+    def check_bad_manifest(self, tag, kind):
+        path = self.root / (tag + '.json')
+        try:
             manifest = copy.deepcopy(self.manifest)
             if kind == 'missing': manifest['manifests'].pop()
             elif kind == 'duplicate': manifest['manifests'][1] = manifest['manifests'][0]
@@ -457,8 +468,30 @@ print((root / (name + '.json')).read_text())
             elif kind == 'index': manifest['digest'] = digest('other index')
             elif kind == 'index format': manifest['digest'] = 'invalid'
             path.write_text('not json' if kind == 'malformed' else json.dumps(manifest))
-            with self.subTest(kind=kind):
+            self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
+        finally:
+            path.write_text(json.dumps(self.manifest))
+
+    def test_invalid_publication_tag_lists_fail_before_registry_writes(self):
+        for tags in (None, [], [self.entry['tagMinor']], ['other', 'other'],
+                     [self.entry['tagMinor'], 'bad tag'], [self.entry['tagMinor'], '-bad'],
+                     [self.entry['tagMinor'], 'a' * 129], self.entry['publishTags'] + [None]):
+            with self.subTest(tags=tags):
+                self.env['ENTRY'] = json.dumps({**self.entry, 'publishTags': tags})
                 self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
+                self.assertFalse((self.root / 'calls').exists())
+
+    def test_debian_and_node_aliases_publish_without_extra_builds(self):
+        for entry in load_variants(ROOT):
+            with self.subTest(tag=entry['tagMinor']):
+                self.env.update(ENTRY=json.dumps(entry), TAG_MINOR=entry['tagMinor'], TAG_PATCH=entry['tagPatch'])
+                for tag in entry['publishTags']:
+                    (self.root / (tag + '.json')).write_text(json.dumps(self.manifest))
+                result = self.run_step('Publish and verify tags')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [json.loads(line) for line in (self.root / 'calls').read_text().splitlines()]
+                create = next(call for call in reversed(calls) if call[2] == 'create')
+                self.assertEqual(create[3:-2], [part for tag in entry['publishTags'] for part in ('--tag', IMAGE + ':' + tag)])
 
     def test_create_failure_stops_tag_verification(self):
         self.env['CREATE_FAILURE'] = '1'
@@ -549,16 +582,18 @@ class RenovateTests(unittest.TestCase):
                         matches+=list(re.finditer(expression,path.read_text()))
             counts.append(len(matches))
         self.assertEqual(counts[:3],[8,28,4])
-        self.assertEqual(counts[3:5], [len(json.loads((ROOT/f'build/apk/3.24/{arch}.json').read_text())['packages']) for arch in ('amd64','arm64')])
-        self.assertEqual(counts[5:8], [1, 1, 0])
-        self.assertEqual(counts[8:], [len(json.loads((ROOT/f'build/apt/trixie/{arch}.json').read_text())['packages']) for arch in ('amd64', 'arm64')])
+        self.assertEqual(counts[3:6], [1, 1, 0])
+        self.assertEqual(counts[6:], [len(json.loads((ROOT/f'build/{backend}/{release}/{arch}.json').read_text())['packages'])
+                                    for backend, release in (('apk', '3.24'), ('apt', 'trixie'))
+                                    for arch in ('amd64', 'arm64')])
 
     def test_revision_aware_architecture_specific_lookup(self):
         config=json.loads((ROOT/'renovate.json').read_text())
         apk=[m for m in config['customManagers'] if m['datasourceTemplate']=='apk']
         self.assertEqual(len(apk),2)
-        self.assertTrue(all('branch=v3.24' in m['registryUrlTemplate'] for m in apk))
-        self.assertEqual({m['registryUrlTemplate'].split('arch=')[1] for m in apk},{'x86_64','aarch64'})
+        rules=[r for r in config['packageRules'] if r.get('matchDatasources') == ['apk']]
+        self.assertTrue(all('branch=v3.24' in r['registryUrls'][0] for r in rules))
+        self.assertEqual({r['registryUrls'][0].split('arch=')[1] for r in rules},{'x86_64','aarch64'})
     def test_only_nonmajor_updates_automerge(self):
         config=json.loads((ROOT/'renovate.json').read_text())
         self.assertFalse(config['automerge'])

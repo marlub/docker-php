@@ -38,18 +38,18 @@ target "_php-8-3-alpine" {
 target "php-8-3-alpine" {
   inherits = ["_php-8-3-alpine"]
   target = "php"
-  tags = ["docker-php:8.3-fpm-alpine"]
+  tags = ["docker-php:8.3-fpm-alpine3.24"]
 }
 
 target "php-8-3-alpine-node24" {
   inherits = ["_php-8-3-alpine"]
   target = "php-node"
-  tags = ["docker-php:8.3-fpm-alpine-node24"]
+  tags = ["docker-php:8.3-fpm-alpine3.24-node24"]
 }
 
 target "_php-8-3-trixie" {
   inherits = ["_common", "_debian"]
-  labels = { "io.github.marlub.docker-php.base-target" = "php-8-3-trixie" }
+  labels = { "io.github.marlub.docker-php.base-target" = "php-8-3-trixie", "io.github.marlub.docker-php.default-debian" = "true" }
   args = extension_args(merge(PHP_8_3, {
     PHP_BASE_IMAGE = "php:8.3.36-fpm-trixie@sha256:699495096ad60a969b9265aa52808c722b72f5e393f3784b794b168cc095a9e6"
   }))

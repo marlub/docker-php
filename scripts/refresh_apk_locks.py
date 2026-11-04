@@ -10,7 +10,7 @@ from image_config import load_image_variants
 
 ROOT = Path(__file__).resolve().parent.parent
 
-def selected_base_images(php=None):
+def selected_base_images(php=None, base_target=None):
     # Refresh must work even when locks are missing or need replacement.
     variants = load_image_variants(ROOT, source_ref="")
     entries = []
@@ -18,6 +18,8 @@ def selected_base_images(php=None):
         if variant["node"] or variant["distribution"] != "alpine":
             continue
         if php is not None and variant["minor"] != php:
+            continue
+        if base_target is not None and variant["base_target"] != base_target:
             continue
         args = variant["bake_args"]
         entries.append({"image": variant["php_image"],
@@ -50,6 +52,8 @@ php apk_lock.php seed baseline.json
                                  '--add-host', 'pecl.php.net:127.0.0.1', '--entrypoint', 'sh',
                                  reference, '-c', script], input=payload.getvalue(), stdout=subprocess.PIPE, check=True)
         lock = json.loads(result.stdout)
+        if lock['architecture'] != {'amd64': 'x86_64', 'arm64': 'aarch64'}[platform.split('/')[1]]:
+            raise ValueError('Resolved APK architecture mismatch')
         release, architecture = lock['alpine'], lock['architecture']
         target = combined.setdefault(release, {})
         for name, version in lock['packages'].items():
@@ -68,11 +72,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-image', help='Use a cached platform-specific base with --php')
     parser.add_argument('--php', help='Refresh using one PHP minor when base package inventories are shared')
+    parser.add_argument('--base-target', help='Refresh only this canonical plain Bake target')
     parser.add_argument('--platform', choices=['linux/amd64', 'linux/arm64'], required=True)
     args = parser.parse_args()
-    entries = selected_base_images(args.php)
+    entries = selected_base_images(args.php, args.base_target)
     if not entries: parser.error('No matching PHP Bake targets')
     if args.base_image:
-        if len(entries) != 1: parser.error('--base-image requires --php')
+        if len(entries) != 1: parser.error('--base-image requires exactly one matching family; use --php and/or --base-target')
         entries[0]['_base_image'] = args.base_image
     refresh(args.platform, entries)

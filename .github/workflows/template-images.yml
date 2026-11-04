@@ -41,7 +41,7 @@ env:
 
 jobs:
   build-and-test:
-    name: ${{ fromJson(inputs.variants)[0].base_target }} (${{ matrix.arch }})
+    name: PHP ${{ fromJson(inputs.variants)[0].minor }} / ${{ fromJson(inputs.variants)[0].distribution }} ${{ fromJson(inputs.variants)[0].distribution_release }} (${{ matrix.arch }})
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false
@@ -134,9 +134,20 @@ jobs:
         run: |
           amd64=$(cat "$RUNNER_TEMP/digests/amd64.digest")
           arm64=$(cat "$RUNNER_TEMP/digests/arm64.digest")
-          docker buildx imagetools create --tag "$IMAGE:$TAG_MINOR" --tag "$IMAGE:$TAG_PATCH" "$IMAGE@$amd64" "$IMAGE@$arm64"
+          [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ && "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # latest belongs to the newest PHP minor's default Debian image with the highest Node major.
+          tags_text=$(jq -er --arg minor "$TAG_MINOR" --arg patch "$TAG_PATCH" '
+            .publishTags | select(type == "array" and length >= 2) |
+            select(length == (unique | length)) |
+            select(all(.[]; type == "string" and test("^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$"))) |
+            select(index($minor) != null and index($patch) != null) | .[]
+          ' <<< "$ENTRY")
+          mapfile -t tags <<< "$tags_text"
+          tag_args=()
+          for tag in "${tags[@]}"; do tag_args+=(--tag "$IMAGE:$tag"); done
+          docker buildx imagetools create "${tag_args[@]}" "$IMAGE@$amd64" "$IMAGE@$arm64"
           indexes=()
-          for tag in "$TAG_MINOR" "$TAG_PATCH"; do
+          for tag in "${tags[@]}"; do
             manifest=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest}}')
             jq -e --arg amd64 "$amd64" --arg arm64 "$arm64" '
               [.manifests[] | {platform: (.platform.os + "/" + .platform.architecture), digest}] | sort_by(.platform) ==
@@ -144,7 +155,7 @@ jobs:
             ' <<< "$manifest" > /dev/null
             indexes+=("$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")")
           done
-          test "${indexes[0]}" = "${indexes[1]}"
+          for index in "${indexes[@]}"; do test "$index" = "${indexes[0]}"; done
       - name: Publication summary
         if: always()
         env:

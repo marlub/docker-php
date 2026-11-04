@@ -67,12 +67,12 @@ class RegistryCleanupTests(unittest.TestCase):
 
     def test_preserves_main_open_pr_unknown_and_mixed_tags(self):
         api = FakeAPI([
-            version(1, ['main-8.4-fpm-alpine-amd64']),
-            version(2, ['pr-42-8.4-fpm-alpine-amd64']),
-            version(3, ['pr-43-8.4-fpm-alpine-amd64']),
-            version(4, ['pr-42-8.4-fpm-alpine-amd64', 'main-8.4-fpm-alpine-amd64']),
-            version(5, ['pr-42-8.4-fpm-alpine-amd64', 'pr-43-8.4-fpm-alpine-amd64']),
-            version(6, ['pr-42-8.4-fpm-alpine-amd64', 'unknown']),
+            version(1, ['main-8.4-fpm-alpine3.24-amd64']),
+            version(2, ['pr-42-8.4-fpm-alpine3.24-amd64']),
+            version(3, ['pr-43-8.4-fpm-alpine3.24-amd64']),
+            version(4, ['pr-42-8.4-fpm-alpine3.24-amd64', 'main-8.4-fpm-alpine3.24-amd64']),
+            version(5, ['pr-42-8.4-fpm-alpine3.24-amd64', 'pr-43-8.4-fpm-alpine3.24-amd64']),
+            version(6, ['pr-42-8.4-fpm-alpine3.24-amd64', 'unknown']),
             version(7, ['pr-42-malformed']),
         ], states={42: 'closed', 43: 'open'})
         self.assertEqual(self.run_cleanup(api), [2])
@@ -80,15 +80,15 @@ class RegistryCleanupTests(unittest.TestCase):
 
     def test_targeted_closed_pr_only_deletes_that_pr_including_shared_variant_tags(self):
         api = FakeAPI([
-            version(1, ['pr-42-8.4-fpm-alpine-amd64', 'pr-42-8.4-fpm-alpine-node24-amd64']),
-            version(2, ['pr-43-8.4-fpm-alpine-arm64']),
+            version(1, ['pr-42-8.4-fpm-alpine3.24-amd64', 'pr-42-8.4-fpm-alpine3.24-node24-amd64']),
+            version(2, ['pr-43-8.4-fpm-alpine3.24-arm64']),
             version(3, []),
         ], states={42: 'closed', 43: 'closed'})
         self.assertEqual(self.run_cleanup(api, pr_number=42), [1])
         self.assertEqual(set(api.versions), {2, 3})
 
     def test_reopened_pr_is_preserved_even_on_closed_event(self):
-        api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'])], states={42: 'open'})
+        api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine3.24-amd64'])], states={42: 'open'})
         self.assertEqual(self.run_cleanup(api, pr_number=42), [])
 
     def test_distribution_releases_and_additional_node_majors_use_existing_cleanup_policy(self):
@@ -107,7 +107,7 @@ class RegistryCleanupTests(unittest.TestCase):
                              (timedelta(hours=48, microseconds=1), [1])):
             for targeted in (False, True):
                 with self.subTest(age=age, targeted=targeted):
-                    api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'])], states={
+                    api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine3.24-amd64'])], states={
                         42: {'state': 'closed', 'merged_at': (NOW - age).isoformat()},
                     })
                     self.assertEqual(self.run_cleanup(api, pr_number=42 if targeted else None), deleted)
@@ -116,7 +116,7 @@ class RegistryCleanupTests(unittest.TestCase):
         for merge_age, cache_age, deleted in ((timedelta(hours=1), timedelta(days=30), []),
                                                (timedelta(hours=49), timedelta(minutes=1), [1])):
             with self.subTest(merge_age=merge_age):
-                api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'], cache_age)], states={
+                api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine3.24-amd64'], cache_age)], states={
                     42: {'state': 'closed', 'merged_at': (NOW - merge_age).isoformat()},
                 })
                 self.assertEqual(self.run_cleanup(api), deleted)
@@ -149,11 +149,11 @@ class RegistryCleanupTests(unittest.TestCase):
     def test_rechecks_tags_and_pr_state_before_deleting(self):
         for change in ('protected tag', 'reopen'):
             with self.subTest(change=change):
-                api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine-amd64'])], states={42: 'closed'})
+                api = FakeAPI([version(1, ['pr-42-8.4-fpm-alpine3.24-amd64'])], states={42: 'closed'})
 
                 def update(api, identifier):
                     if change == 'protected tag':
-                        api.versions[identifier]['metadata']['container']['tags'].append('main-8.4-fpm-alpine-amd64')
+                        api.versions[identifier]['metadata']['container']['tags'].append('main-8.4-fpm-alpine3.24-amd64')
                     else:
                         api.states[42] = 'open'
 

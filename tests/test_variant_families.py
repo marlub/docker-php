@@ -64,7 +64,7 @@ class FamilyConfigurationTests(RepositoryTests):
             ('NODE_BASE_IMAGE = "node:26.1.0-alpine3.24', 'NODE_BASE_IMAGE = "node:26.1.0-bookworm'),
             ('NODE_BASE_IMAGE = "node:26.1.0-alpine3.24', 'NODE_BASE_IMAGE = "node:24.1.0-alpine3.24'),
             ('node:26.1.0-alpine3.24@sha256:' + '1' * 64, 'node:latest'),
-            ('tags = ["docker-php:8.4-fpm-bookworm"]', 'tags = ["docker-php:8.4-fpm-alpine"]'),
+            ('tags = ["docker-php:8.4-fpm-bookworm"]', 'tags = ["docker-php:8.4-fpm-alpine3.24"]'),
             ('target "php-8-4-alpine-node26" {', 'target "php-8-4-alpine-node26" {\n  dockerfile = "Dockerfile.fixture"'),
         ]
         for before, after in replacements:
