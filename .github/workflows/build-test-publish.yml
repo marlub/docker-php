@@ -96,7 +96,7 @@ jobs:
           python scripts/find_merged_pr_caches.py "${args[@]}"
 
   build-and-test:
-    name: ${{ matrix.phpgroup.id }}
+    name: PHP ${{ matrix.phpgroup.minor }}
     permissions:
       contents: read
       packages: write

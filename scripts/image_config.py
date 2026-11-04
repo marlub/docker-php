@@ -11,6 +11,7 @@ from typing import Any, TypedDict
 REVISION_LABEL = "org.opencontainers.image.revision"
 VARIANT_LABEL = "io.github.marlub.docker-php.variant"
 BASE_TARGET_LABEL = "io.github.marlub.docker-php.base-target"
+DEFAULT_DEBIAN_LABEL = "io.github.marlub.docker-php.default-debian"
 
 
 class ConfigurationError(ValueError):
@@ -35,6 +36,7 @@ class ImageVariant(TypedDict):
     packages: str
     tagMinor: str
     tagPatch: str
+    publishTags: list[str]
     source_ref: str
     extension_versions: dict[str, str]
     xhprof: dict[str, str] | None
@@ -145,6 +147,8 @@ def load_image_variants(root: Path, source_ref: str) -> list[ImageVariant]:
     variants: list[ImageVariant] = []
     seen_targets: set[str] = set()
     seen_tags: set[str] = set()
+    seen_families: set[tuple[str, str, str]] = set()
+    default_debian: dict[str, list[str]] = {}
     tools_by_recipe = {}
     for path in sorted((root / "build/php").glob("*.hcl")):
         try:
@@ -183,6 +187,20 @@ def load_image_variants(root: Path, source_ref: str) -> list[ImageVariant]:
                     raise ConfigurationError("PHP Bake file does not match its image")
                 minor = php["minor"]
                 distribution, release = distribution_from_tag(php["os"])
+                default = plain.get("labels", {}).get(DEFAULT_DEBIAN_LABEL, "false")
+                if default not in ("true", "false") or (default == "true" and distribution != "debian"):
+                    raise ConfigurationError("Default Debian label must be true or false on a Debian family")
+                if config.get("labels", {}).get(DEFAULT_DEBIAN_LABEL, "false") != default:
+                    raise ConfigurationError("Family targets must share their default Debian label")
+                if target == base_target:
+                    family_key = (minor, distribution, release)
+                    if family_key in seen_families:
+                        raise ConfigurationError("Duplicate PHP distribution/release family")
+                    seen_families.add(family_key)
+                    if distribution == "debian":
+                        defaults = default_debian.setdefault(minor, [])
+                        if default == "true":
+                            defaults.append(base_target)
                 expected = _extension_versions(shared, minor)
                 if recipe not in tools_by_recipe:
                     tools_by_recipe[recipe] = _load_tool_images(root / recipe)
@@ -204,8 +222,8 @@ def load_image_variants(root: Path, source_ref: str) -> list[ImageVariant]:
                     raise ConfigurationError("Duplicate Node major or plain image in a family")
                 majors.add(node_major)
                 base_tag = _local_tag(plain)
-                if not base_tag.startswith(minor + "-fpm-"):
-                    raise ConfigurationError("Plain image tag must identify its PHP minor and FPM distribution")
+                if base_tag != minor + "-fpm-" + php["os"]:
+                    raise ConfigurationError("Plain image tag must match its PHP minor and distribution/release")
                 tag = _local_tag(config)
                 if tag != base_tag + ("-node" + node_major if node_major else ""):
                     raise ConfigurationError("Node image tag must identify its configured major")
@@ -221,11 +239,44 @@ def load_image_variants(root: Path, source_ref: str) -> list[ImageVariant]:
                     "php_image": args["PHP_BASE_IMAGE"], "node_image": node_image,
                     "node": node_major, "node_version": node_version,
                     "extensions": args["EXTENSIONS"], "packages": args.get("PACKAGES", ""),
-                    "tagMinor": tag, "tagPatch": patch_tag, "source_ref": source_ref,
+                    "tagMinor": tag, "tagPatch": patch_tag, "publishTags": [tag, patch_tag], "source_ref": source_ref,
                     "extension_versions": dict(expected),
                     "xhprof": {"tag": args["XHPROF_TAG"], "commit": args["XHPROF_COMMIT"]} if "xhprof" in args["EXTENSIONS"].split() else None,
                     "composer_version": tools["COMPOSER_IMAGE"].split("@")[0].rsplit(":", 1)[1].removesuffix("-bin"),
                 })
         except (KeyError, TypeError, ValueError, OSError) as error:
             raise ConfigurationError(f"{path}: {error}") from error
+    for minor, defaults in default_debian.items():
+        if len(defaults) != 1:
+            raise ConfigurationError(f"PHP {minor} requires exactly one default Debian family")
+    latest_debian_minor = max(default_debian, key=lambda minor: tuple(map(int, minor.split("."))), default=None)
+    latest_debian_target = default_debian[latest_debian_minor][0] if latest_debian_minor else None
+    latest_node_major = max((int(variant["node"]) for variant in variants
+                             if variant["base_target"] == latest_debian_target and variant["node"]), default=0)
+    if latest_debian_target and not latest_node_major:
+        raise ConfigurationError("The newest default Debian family requires a Node variant for latest")
+    latest_alpine: dict[str, tuple[int, ...]] = {}
+    for variant in variants:
+        if variant["distribution"] == "alpine":
+            release = tuple(map(int, variant["distribution_release"].split(".")))
+            latest_alpine[variant["minor"]] = max(latest_alpine.get(variant["minor"], ()), release)
+    # Resolve aliases from the full inventory, never from a selected build subset.
+    for variant in variants:
+        minor = variant["minor"]
+        if variant["distribution"] == "alpine":
+            owns_aliases = tuple(map(int, variant["distribution_release"].split("."))) == latest_alpine[minor]
+            suffix = "-alpine"
+        else:
+            owns_aliases = variant["base_target"] == default_debian[minor][0]
+            suffix = ""
+        if not owns_aliases:
+            continue
+        suffix += "-node" + variant["node"] if variant["node"] else ""
+        aliases = [version + "-fpm" + suffix for version in (minor, variant["php_version"])]
+        if variant["distribution"] == "debian" and minor == latest_debian_minor and variant["node"] == str(latest_node_major):
+            aliases.append("latest")
+        if any(tag in seen_tags for tag in aliases) or len(set(aliases)) != len(aliases):
+            raise ConfigurationError("Conflicting publication aliases")
+        seen_tags.update(aliases)
+        variant["publishTags"].extend(aliases)
     return sorted(variants, key=lambda v: (tuple(map(int, v["minor"].split("."))), v["base_target"], variant_order(v)))

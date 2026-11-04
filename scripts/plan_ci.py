@@ -4,11 +4,14 @@
 import argparse
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 from typing import Literal, Mapping, Sequence, TypedDict
 
 from image_config import ImageVariant, load_image_variants, variant_order
@@ -186,6 +189,12 @@ def _affected_image_tags(
         matching: Sequence[ImageVariant]
         if php_manifest:
             matching = [variant for variant in variants if variant["minor"] == php_manifest[1]]
+            # Removing the newest Debian minor must also republish its successor's
+            # latest alias, even though that successor's own files did not change.
+            if re.fullmatch(r"8\.\d+", php_manifest[1]):
+                changed_minor = tuple(map(int, php_manifest[1].split(".")))
+                matching += [variant for variant in variants if "latest" in variant.get("publishTags", [])
+                             and changed_minor > tuple(map(int, variant["minor"].split(".")))]
         elif package_lock:
             matching = [variant for variant in variants if variant["distribution"] == {"apk": "alpine", "apt": "debian"}[package_lock[1]]
                         and variant["distribution_release"] == package_lock[2]]
@@ -286,7 +295,18 @@ def is_candidate_superseded(variant: ImageVariant, root: Path) -> bool:
     tags = affected_image_tags(
         variants, root, variant["source_ref"], "refs/remotes/origin/main", purpose="publish"
     )
-    return variant["tagMinor"] in tags
+    if variant["tagMinor"] in tags:
+        return True
+    if "latest" in variant.get("publishTags", []):
+        # A newer PHP minor can take latest without changing this minor's files.
+        # Resolve current main so a queued older candidate cannot move it back.
+        snapshot = subprocess.check_output(["git", "-C", str(root), "archive", "refs/remotes/origin/main"])
+        with tempfile.TemporaryDirectory() as directory:
+            with tarfile.open(fileobj=io.BytesIO(snapshot)) as archive:
+                archive.extractall(directory, filter="data")
+            current = load_image_variants(Path(directory), source_ref="")
+        return not any(entry["tagMinor"] == variant["tagMinor"] and "latest" in entry["publishTags"] for entry in current)
+    return False
 
 
 def _append_github_outputs(path: Path | None, values: Mapping[str, str]) -> None:

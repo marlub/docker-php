@@ -251,7 +251,7 @@ class CandidateTransferTests(unittest.TestCase):
     def test_transfer_checks_exact_loaded_image_and_returns_digest_only_after_upload(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
-            image = 'docker-php-ci:8.4-fpm-alpine'
+            image = 'docker-php-ci:8.4-fpm-alpine3.24'
             config_id = digest(image)
             image_digest = digest('manifest')
             write_oci(directory / 'image.tar', config_id, image_digest)
@@ -264,7 +264,7 @@ class CandidateTransferTests(unittest.TestCase):
         for failure in ('config', 'manifest', 'malformed', 'transfer'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
                 directory = Path(temp)
-                image = 'docker-php-ci:8.4-fpm-alpine'
+                image = 'docker-php-ci:8.4-fpm-alpine3.24'
                 write_oci(directory / 'image.tar', digest('other') if failure == 'config' else digest(image),
                           digest('manifest'), manifests=[] if failure == 'manifest' else [None] if failure == 'malformed' else None)
                 commands = FakeCommands(directory, {image.split(':')[1]: failure})
@@ -289,6 +289,7 @@ class WorkflowGuardsTests(unittest.TestCase):
         self.assertEqual(build_job.count('uses: ./.github/actions/build-group'), 1)
         self.assertIn('builder: ${{ steps.builder.outputs.name }}', build_job)
         self.assertIn('max-parallelism = 1', build_job)
+        self.assertIn('name: ${{ fromJson(inputs.variants)[0].distribution }} ${{ fromJson(inputs.variants)[0].distribution_release }} (${{ matrix.arch }})', build_job)
         self.assertNotIn('steps.plain', workflow)
         self.assertIn('if: ${{ !cancelled() && inputs.publish }}', publish)
         self.assertIn('variant: ${{ fromJson(inputs.variants) }}', publish)
@@ -305,7 +306,7 @@ class WorkflowGuardsTests(unittest.TestCase):
         self.assertEqual(action.count('name: Log in to publication registry'), 1)
         for caller in ('build-test.yml', 'build-test-publish.yml'):
             content = (ROOT / '.github/workflows' / caller).read_text()
-            self.assertIn('name: ${{ matrix.phpgroup.id }}', content)
+            self.assertIn('    name: PHP ${{ matrix.phpgroup.minor }}\n', content)
             self.assertIn('variants: ${{ toJson(matrix.phpgroup.variants) }}', content)
 
 

@@ -160,7 +160,7 @@ class SelectionPurposeTests(RepositoryTests):
                 self.assertEqual(tested['renovate_changes'], renovate)
                 published = create_ci_plan(self.entries(), self.root, before, purpose='publish')
                 self.assertEqual([e['tagMinor'] for e in published['phpimages']],
-                                 ['8.3-fpm-alpine', '8.3-fpm-alpine-node24', '8.3-fpm-trixie', '8.3-fpm-trixie-node24'])
+                                 ['8.3-fpm-alpine3.24', '8.3-fpm-alpine3.24-node24', '8.3-fpm-trixie', '8.3-fpm-trixie-node24'])
 
     def test_installer_renames_and_deletions_select_publication(self):
         path = self.root / 'scripts/build_pie_extension.sh'

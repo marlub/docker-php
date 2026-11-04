@@ -50,7 +50,7 @@ jobs:
     uses: ./.github/workflows/template-renovate.yml
 
   build-and-test:
-    name: ${{ matrix.phpgroup.id }}
+    name: PHP ${{ matrix.phpgroup.minor }}
     permissions:
       contents: read
       packages: write

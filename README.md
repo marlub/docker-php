@@ -15,10 +15,15 @@ Images support `linux/amd64` and `linux/arm64`. The default `php.ini` is based o
 
 | ⚙️ PHP version | ✨ Image variants |
 | -------------- | ------------------ |
-| 8.5 | ghcr.io/marlub/php:8.5-fpm-alpine<br>ghcr.io/marlub/php:8.5-fpm-alpine-node24<br>ghcr.io/marlub/php:8.5-fpm-trixie<br>ghcr.io/marlub/php:8.5-fpm-trixie-node24 |
-| 8.4 | ghcr.io/marlub/php:8.4-fpm-alpine<br>ghcr.io/marlub/php:8.4-fpm-alpine-node24<br>ghcr.io/marlub/php:8.4-fpm-trixie<br>ghcr.io/marlub/php:8.4-fpm-trixie-node24 |
-| 8.3 | ghcr.io/marlub/php:8.3-fpm-alpine<br>ghcr.io/marlub/php:8.3-fpm-alpine-node24<br>ghcr.io/marlub/php:8.3-fpm-trixie<br>ghcr.io/marlub/php:8.3-fpm-trixie-node24 |
-| 8.2 | ghcr.io/marlub/php:8.2-fpm-alpine<br>ghcr.io/marlub/php:8.2-fpm-alpine-node24<br>ghcr.io/marlub/php:8.2-fpm-trixie<br>ghcr.io/marlub/php:8.2-fpm-trixie-node24 |
+| Latest | ghcr.io/marlub/php:latest |
+| 8.5 | ghcr.io/marlub/php:8.5-fpm-alpine<br>ghcr.io/marlub/php:8.5-fpm-alpine-node24<br>ghcr.io/marlub/php:8.5-fpm<br>ghcr.io/marlub/php:8.5-fpm-node24 |
+| 8.4 | ghcr.io/marlub/php:8.4-fpm-alpine<br>ghcr.io/marlub/php:8.4-fpm-alpine-node24<br>ghcr.io/marlub/php:8.4-fpm<br>ghcr.io/marlub/php:8.4-fpm-node24 |
+| 8.3 | ghcr.io/marlub/php:8.3-fpm-alpine<br>ghcr.io/marlub/php:8.3-fpm-alpine-node24<br>ghcr.io/marlub/php:8.3-fpm<br>ghcr.io/marlub/php:8.3-fpm-node24 |
+| 8.2 | ghcr.io/marlub/php:8.2-fpm-alpine<br>ghcr.io/marlub/php:8.2-fpm-alpine-node24<br>ghcr.io/marlub/php:8.2-fpm<br>ghcr.io/marlub/php:8.2-fpm-node24 |
+
+The table uses floating aliases: Alpine tags follow the newest configured Alpine release, and OS-free tags follow the explicitly configured default Debian family for each PHP minor. Release-specific tags are also available to stay on a particular Alpine release or Debian codename. Each variant also has full PHP patch version tags.
+
+`latest` follows the newest configured PHP minor's default Debian image with the highest configured Node.js major.
 
 ## 🧬 Extensions added on top of the official PHP images
 ```

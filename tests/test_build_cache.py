@@ -15,7 +15,7 @@ CACHE = 'ghcr.io/marlub/php-buildcache'
 
 class CacheRoutingTests(unittest.TestCase):
     def configure(self, **overrides):
-        env = dict(CACHE_IMAGE=CACHE, TAG_MINOR='8.4-fpm-alpine', ARCH='amd64',
+        env = dict(CACHE_IMAGE=CACHE, TAG_MINOR='8.4-fpm-alpine3.24', ARCH='amd64',
                    PUBLISH='false', EVENT_NAME='pull_request', REF='refs/pull/42/merge',
                    ACTOR='renovate[bot]', REPOSITORY='marlub/docker-php',
                    PR_HEAD_REPOSITORY='marlub/docker-php', PR_NUMBER='42', MERGED_PRS='[]', NO_CACHE='false')
@@ -28,9 +28,9 @@ class CacheRoutingTests(unittest.TestCase):
         output, settings = self.configure()
         self.assertEqual(output, {'registry': 'ghcr.io', 'write': 'true'})
         self.assertEqual(settings, [
-            f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine-amd64',
-            f'*.cache-from+=type=registry,ref={CACHE}:pr-42-8.4-fpm-alpine-amd64',
-            f'*.cache-to=type=registry,ref={CACHE}:pr-42-8.4-fpm-alpine-amd64,mode=max,ignore-error=true',
+            f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine3.24-amd64',
+            f'*.cache-from+=type=registry,ref={CACHE}:pr-42-8.4-fpm-alpine3.24-amd64',
+            f'*.cache-to=type=registry,ref={CACHE}:pr-42-8.4-fpm-alpine3.24-amd64,mode=max,ignore-error=true',
         ])
 
     def test_main_push_and_manual_publication_without_discovered_prs_use_only_main(self):
@@ -39,8 +39,8 @@ class CacheRoutingTests(unittest.TestCase):
                 output, settings = self.configure(PUBLISH='true', EVENT_NAME=event, REF='refs/heads/main')
                 self.assertEqual(output['write'], 'true')
                 self.assertEqual(settings, [
-                    f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine-amd64',
-                    f'*.cache-to=type=registry,ref={CACHE}:main-8.4-fpm-alpine-amd64,mode=max,ignore-error=true',
+                    f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine3.24-amd64',
+                    f'*.cache-to=type=registry,ref={CACHE}:main-8.4-fpm-alpine3.24-amd64,mode=max,ignore-error=true',
                 ])
 
     def test_main_imports_discovered_pr_caches_and_exports_only_main(self):
@@ -51,10 +51,10 @@ class CacheRoutingTests(unittest.TestCase):
                                                       ARCH=arch, MERGED_PRS='[43,42,43]')
                     self.assertEqual(output['write'], 'true')
                     self.assertEqual(settings, [
-                        f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine-{arch}',
-                        f'*.cache-from+=type=registry,ref={CACHE}:pr-42-8.4-fpm-alpine-{arch}',
-                        f'*.cache-from+=type=registry,ref={CACHE}:pr-43-8.4-fpm-alpine-{arch}',
-                        f'*.cache-to=type=registry,ref={CACHE}:main-8.4-fpm-alpine-{arch},mode=max,ignore-error=true',
+                        f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine3.24-{arch}',
+                        f'*.cache-from+=type=registry,ref={CACHE}:pr-42-8.4-fpm-alpine3.24-{arch}',
+                        f'*.cache-from+=type=registry,ref={CACHE}:pr-43-8.4-fpm-alpine3.24-{arch}',
+                        f'*.cache-to=type=registry,ref={CACHE}:main-8.4-fpm-alpine3.24-{arch},mode=max,ignore-error=true',
                     ])
 
     def test_pr_runs_ignore_discovered_merged_prs(self):
@@ -83,7 +83,7 @@ class CacheRoutingTests(unittest.TestCase):
             with self.subTest(case=case):
                 output, settings = self.configure(MERGED_PRS='[99]', **case)
                 self.assertEqual(output['write'], 'false')
-                self.assertEqual(settings, [f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine-amd64'])
+                self.assertEqual(settings, [f'*.cache-from=type=registry,ref={CACHE}:main-8.4-fpm-alpine3.24-amd64'])
 
     def test_every_variant_architecture_and_pr_has_a_distinct_write_reference(self):
         refs = set()
@@ -101,7 +101,7 @@ class CacheRoutingTests(unittest.TestCase):
         self.assertTrue(all('example.test/team/cache:' in line for line in settings))
 
     def test_forced_rebuilds_disable_all_imports_but_preserve_exports(self):
-        for tag in ('8.4-fpm-alpine', '8.4-fpm-alpine-node24'):
+        for tag in ('8.4-fpm-alpine3.24', '8.4-fpm-alpine3.24-node24'):
             for arch in ('amd64', 'arm64'):
                 for event in ({}, {'PUBLISH': 'true', 'EVENT_NAME': 'push', 'REF': 'refs/heads/main'},
                               {'PR_HEAD_REPOSITORY': 'contributor/docker-php'}, {'ACTOR': 'dependabot[bot]'}):
@@ -131,7 +131,7 @@ class CacheRoutingTests(unittest.TestCase):
                     self.assertTrue(target['no-cache'])
                     self.assertEqual(len(target['cache-from']), 3 if publish else 2)
                     self.assertEqual(target['cache-to'], [{
-                        'type': 'registry', 'ref': f'{CACHE}:{scope}-8.4-fpm-alpine-{arch}',
+                        'type': 'registry', 'ref': f'{CACHE}:{scope}-8.4-fpm-alpine3.24-{arch}',
                         'mode': 'max', 'ignore-error': 'true',
                     }])
                     self.assertEqual([output['type'] for output in target['output']],
