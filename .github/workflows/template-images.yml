@@ -41,7 +41,7 @@ env:
 
 jobs:
   build-and-test:
-    name: PHP ${{ fromJson(inputs.variants)[0].minor }} / ${{ fromJson(inputs.variants)[0].distribution }} ${{ fromJson(inputs.variants)[0].distribution_release }} (${{ matrix.arch }})
+    name: ${{ fromJson(inputs.variants)[0].distribution }} ${{ fromJson(inputs.variants)[0].distribution_release }} (${{ matrix.arch }})
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     strategy:
       fail-fast: false

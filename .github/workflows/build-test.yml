@@ -50,7 +50,7 @@ jobs:
     uses: ./.github/workflows/template-renovate.yml
 
   build-and-test:
-    name: PHP ${{ matrix.phpgroup.minor }} / ${{ matrix.phpgroup.distribution }} ${{ matrix.phpgroup.distribution_release }}
+    name: PHP ${{ matrix.phpgroup.minor }}
     permissions:
       contents: read
       packages: write

@@ -289,7 +289,7 @@ class WorkflowGuardsTests(unittest.TestCase):
         self.assertEqual(build_job.count('uses: ./.github/actions/build-group'), 1)
         self.assertIn('builder: ${{ steps.builder.outputs.name }}', build_job)
         self.assertIn('max-parallelism = 1', build_job)
-        self.assertIn('name: PHP ${{ fromJson(inputs.variants)[0].minor }} / ${{ fromJson(inputs.variants)[0].distribution }} ${{ fromJson(inputs.variants)[0].distribution_release }} (${{ matrix.arch }})', build_job)
+        self.assertIn('name: ${{ fromJson(inputs.variants)[0].distribution }} ${{ fromJson(inputs.variants)[0].distribution_release }} (${{ matrix.arch }})', build_job)
         self.assertNotIn('steps.plain', workflow)
         self.assertIn('if: ${{ !cancelled() && inputs.publish }}', publish)
         self.assertIn('variant: ${{ fromJson(inputs.variants) }}', publish)
@@ -306,7 +306,7 @@ class WorkflowGuardsTests(unittest.TestCase):
         self.assertEqual(action.count('name: Log in to publication registry'), 1)
         for caller in ('build-test.yml', 'build-test-publish.yml'):
             content = (ROOT / '.github/workflows' / caller).read_text()
-            self.assertIn('name: PHP ${{ matrix.phpgroup.minor }} / ${{ matrix.phpgroup.distribution }} ${{ matrix.phpgroup.distribution_release }}', content)
+            self.assertIn('    name: PHP ${{ matrix.phpgroup.minor }}\n', content)
             self.assertIn('variants: ${{ toJson(matrix.phpgroup.variants) }}', content)
 
 
