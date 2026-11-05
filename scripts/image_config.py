@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -140,9 +141,24 @@ def _local_tag(config: dict[str, Any]) -> str:
     return tags[0].removeprefix("docker-php:")
 
 
+@dataclass(frozen=True)
+class ImageConfiguration:
+    variants: list[ImageVariant]
+    targets: dict[str, dict[str, Any]]
+
+
+def load_image_configuration(root: Path, source_ref: str) -> ImageConfiguration:
+    """Resolve and validate one inventory, retaining every target's build settings."""
+    document = resolve_bake_config(root)
+    return ImageConfiguration(_image_variants(root, source_ref, document), document["target"])
+
+
 def load_image_variants(root: Path, source_ref: str) -> list[ImageVariant]:
     """Read publishable families and all their selected Node image configurations."""
-    document = resolve_bake_config(root)
+    return load_image_configuration(root, source_ref).variants
+
+
+def _image_variants(root: Path, source_ref: str, document: dict[str, Any]) -> list[ImageVariant]:
     resolved = document["target"]
     variants: list[ImageVariant] = []
     seen_targets: set[str] = set()

@@ -91,7 +91,7 @@ class FamilyConfigurationTests(RepositoryTests):
         self.change_node()
         self.commit()
         selected = create_ci_plan(self.entries(), self.root, before)
-        self.assertEqual(len(selected['phpimages']), 5)
+        self.assertEqual(len(selected['phpimages']), 4)
         self.assertTrue(all(v['node'] and v['distribution'] == 'alpine' for v in selected['phpimages']))
         before = self.git('rev-parse', 'HEAD')
         recipe = self.root / 'Dockerfile.fixture'
@@ -136,8 +136,9 @@ class FamilyConfigurationTests(RepositoryTests):
         published = create_ci_plan(self.entries(), self.root, before, purpose='publish')
         self.assertEqual({entry['tagMinor'] for entry in published['phpimages']},
                          {entry['tagMinor'] for entry in entries
-                          if entry['dockerfile'] == 'Dockerfile' and entry['node']})
-        # PIE plus Node changes within a recipe retain all configured Node majors.
+                          if entry['dockerfile'] == 'Dockerfile' and entry['node']
+                          and 'NODE_BASE_IMAGE' not in entry['bake_args']})
+        # Default Node pin changes leave explicit target overrides unchanged.
         before = self.git('rev-parse', 'HEAD')
         self.change_pie(version='2.0.0')
         path = self.root / 'Dockerfile'
@@ -146,7 +147,8 @@ class FamilyConfigurationTests(RepositoryTests):
         published = create_ci_plan(self.entries(), self.root, before, purpose='publish')
         self.assertEqual({entry['tagMinor'] for entry in published['phpimages']},
                          {entry['tagMinor'] for entry in entries
-                          if entry['dockerfile'] == 'Dockerfile' and entry['node']})
+                          if entry['dockerfile'] == 'Dockerfile' and entry['node']
+                          and 'NODE_BASE_IMAGE' not in entry['bake_args']})
 
     def test_renovate_extracts_target_specific_pins_and_keeps_every_major_explicit(self):
         config = json.loads((self.root / 'renovate.json').read_text())

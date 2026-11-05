@@ -227,7 +227,7 @@ class SelectionTests(RepositoryTests):
     def test_shared_bake_and_recipe_changes_select_their_consumers(self):
         for name, content in [('docker-bake.hcl', '\n# shared configuration\n'), ('Dockerfile', '\nFROM php AS other\n')]:
             changed = self.affected(lambda: (self.root / name).write_text((self.root / name).read_text() + content))
-            self.assertEqual(len(changed), 16 if name == 'docker-bake.hcl' else 8)
+            self.assertEqual(len(changed), 0 if name == 'docker-bake.hcl' else 8)
 
     def test_alpine_pie_and_composer_updates_select_alpine(self):
         path = self.root / 'Dockerfile'

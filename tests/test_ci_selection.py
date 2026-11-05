@@ -91,7 +91,12 @@ class SelectionPurposeTests(RepositoryTests):
         path = self.root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         content = path.read_text() if path.exists() else ''
-        path.write_text(content.replace('RUN cp ', 'RUN cp -v ', 1) if filename in ('Dockerfile', 'Dockerfile.debian') else content + '\n')
+        if filename == 'docker-bake.hcl':
+            path.write_text(content.replace('127.0.0.1', '127.0.0.2'))
+        elif filename == 'build/php/8.3.hcl':
+            self.change_arg('8.3', 'REDIS_VERSION', '6.3.99')
+        else:
+            path.write_text(content.replace('RUN cp ', 'RUN cp -v ', 1) if filename in ('Dockerfile', 'Dockerfile.debian') else content + '\n')
         self.commit()
 
     def test_publication_inputs_and_pr_only_paths(self):
@@ -268,6 +273,8 @@ class PiePublicationSelectionTests(RepositoryTests):
                                          r'\g<1>3.0.0', content)
                     elif case == 'recipe':
                         content = content.replace('RUN cp ', 'RUN cp -v ', 1)
+                    elif case == 'shared':
+                        content = content.replace('127.0.0.1', '127.0.0.2')
                     else:
                         content += '\n'
                     path.write_text(content)

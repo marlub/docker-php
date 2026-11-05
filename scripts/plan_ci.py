@@ -2,6 +2,7 @@
 """Plan image builds and Renovate validation from configuration and Git changes."""
 
 import argparse
+import copy
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import io
@@ -14,7 +15,9 @@ import tarfile
 import tempfile
 from typing import Literal, Mapping, Sequence, TypedDict
 
-from image_config import ImageVariant, load_image_variants, variant_order
+from image_config import (ConfigurationError, ImageConfiguration, ImageVariant,
+                          REVISION_LABEL, VARIANT_LABEL, load_image_configuration,
+                          load_image_variants, variant_order)
 
 
 Purpose = Literal["test", "publish"]
@@ -97,6 +100,42 @@ def read_changes(root: Path, base_ref: str, head_ref: str = "HEAD") -> ChangeSet
     return ChangeSet(base_commit=base, head_commit=head, paths=paths)
 
 
+class _ConfigurationSnapshots:
+    """Resolve committed inputs with today's loader, once per endpoint."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.configurations: dict[str, ImageConfiguration] = {}
+
+    def load(self, commit: str) -> ImageConfiguration:
+        if commit not in self.configurations:
+            snapshot = subprocess.check_output(["git", "-C", str(self.root), "archive", commit])
+            with tempfile.TemporaryDirectory() as directory:
+                with tarfile.open(fileobj=io.BytesIO(snapshot)) as archive:
+                    archive.extractall(directory, filter="data")
+                self.configurations[commit] = load_image_configuration(Path(directory), source_ref=commit)
+        return self.configurations[commit]
+
+
+def _configuration_signatures(configuration: ImageConfiguration) -> dict[str, object]:
+    signatures = {}
+    for variant in configuration.variants:
+        metadata = copy.deepcopy(variant)
+        metadata.pop("source_ref")
+        metadata["publishTags"] = sorted(metadata["publishTags"])
+        target = copy.deepcopy(configuration.targets[variant["bake_target"]])
+        # These labels are supplied by the group controller for every build.
+        labels = target.get("labels", {})
+        for label in (REVISION_LABEL, VARIANT_LABEL):
+            labels.pop(label, None)
+        if not variant["node"]:
+            for name in ("NODE_BASE_IMAGE", "NODE_VERSION"):
+                metadata["bake_args"].pop(name, None)
+                target.get("args", {}).pop(name, None)
+        signatures[variant["tagMinor"]] = (metadata, target)
+    return signatures
+
+
 def _image_ignores(purpose: Purpose) -> tuple[str, ...]:
     if purpose == "test":
         return IMAGE_TEST_IGNORED_PATHS
@@ -153,9 +192,24 @@ def _normalize_pie_pin(dockerfile: str) -> str | None:
     return dockerfile[:pin.start("image")] + image + dockerfile[pin.end("image"):]
 
 
+def _normalize_node_pin(dockerfile: str) -> str | None:
+    """Recognize only a default Node image pin in the supported recipe layout."""
+    declarations = re.findall(r"^[ \t]*ARG[ \t]+NODE_BASE_IMAGE(?=[= \t]|$)",
+                              dockerfile, re.MULTILINE | re.IGNORECASE)
+    pin = re.search(
+        r'^ARG NODE_BASE_IMAGE="(?P<image>node:\d+\.\d+\.\d+-[a-z0-9.-]+@sha256:[a-f0-9]{64})"$',
+        dockerfile, re.MULTILINE,
+    )
+    first_stage = re.search(r"^FROM ", dockerfile, re.MULTILINE)
+    if (len(declarations) != 1 or pin is None or first_stage is None
+            or pin.end() >= first_stage.start() or _without_node_stages(dockerfile) is None):
+        return None
+    return dockerfile[:pin.start("image")] + "<node-image>" + dockerfile[pin.end("image"):]
+
+
 def _recipe_change_scope(
     root: Path, changes: ChangeSet, path: str, purpose: Purpose,
-) -> Literal["none", "node", "all"]:
+) -> Literal["none", "node-pin", "node", "all"]:
     before = _file_at_commit(root, changes.base_commit, path)
     after = _file_at_commit(root, changes.head_commit, path)
     if before is None or after is None:
@@ -169,16 +223,40 @@ def _recipe_change_scope(
                 return "none"
     shared_before = _without_node_stages(before)
     if shared_before is not None and shared_before == _without_node_stages(after):
+        normalized_before = _normalize_node_pin(before)
+        if normalized_before is not None and normalized_before == _normalize_node_pin(after):
+            return "node-pin"
         return "node"
     return "all"
 
 
 def _affected_image_tags(
-    variants: Sequence[ImageVariant], root: Path, changes: ChangeSet, purpose: Purpose
+    variants: Sequence[ImageVariant], root: Path, changes: ChangeSet, purpose: Purpose,
+    snapshots: _ConfigurationSnapshots | None = None,
 ) -> set[str]:
     ignored = _image_ignores(purpose)
     if changes.initial_push:
         return {variant["tagMinor"] for variant in variants}
+
+    snapshots = snapshots or _ConfigurationSnapshots(root)
+    compared = False
+    configuration_changes: set[str] | None = None
+
+    def changed_configurations() -> set[str] | None:
+        nonlocal compared, configuration_changes
+        if not compared:
+            # Invalid current inputs must fail even when the historical loader fails.
+            after = _configuration_signatures(snapshots.load(changes.head_commit))
+            try:
+                before = _configuration_signatures(snapshots.load(changes.base_commit))
+            except ConfigurationError as error:
+                print(f"::warning::Cannot resolve historical configuration at {changes.base_commit}; "
+                      f"using conservative change selection: {error}", file=sys.stderr)
+            else:
+                configuration_changes = {tag for tag in before.keys() | after.keys()
+                                         if before.get(tag) != after.get(tag)}
+            compared = True
+        return configuration_changes
 
     affected: set[str] = set()
     for path in changes.paths:
@@ -187,7 +265,14 @@ def _affected_image_tags(
         php_manifest = re.fullmatch(r"build/php/([^/]+)\.hcl", path)
         package_lock = re.fullmatch(r"build/(apk|apt)/([^/]+)/[^/]+\.json", path)
         matching: Sequence[ImageVariant]
-        if php_manifest:
+        if php_manifest or path == "docker-bake.hcl":
+            changed = changed_configurations()
+            if changed is not None:
+                affected.update(variant["tagMinor"] for variant in variants if variant["tagMinor"] in changed)
+                continue
+            if not php_manifest:
+                affected.update(variant["tagMinor"] for variant in variants)
+                continue
             matching = [variant for variant in variants if variant["minor"] == php_manifest[1]]
             # Removing the newest Debian minor must also republish its successor's
             # latest alias, even though that successor's own files did not change.
@@ -200,8 +285,10 @@ def _affected_image_tags(
                         and variant["distribution_release"] == package_lock[2]]
         elif path in {variant["dockerfile"] for variant in variants}:
             scope = _recipe_change_scope(root, changes, path, purpose)
+            changed = changed_configurations() if scope == "node-pin" else None
             matching = [variant for variant in variants if variant["dockerfile"] == path
-                        and (scope == "all" or (scope == "node" and variant["node"]))]
+                        and (scope == "all" or (scope in ("node", "node-pin") and variant["node"]
+                             and (changed is None or variant["tagMinor"] in changed)))]
         else:
             matching = variants
         affected.update(variant["tagMinor"] for variant in matching)
@@ -218,6 +305,7 @@ def affected_image_tags(
 def create_ci_plan(
     variants: Sequence[ImageVariant], root: Path, base_ref: str | None = None,
     *, php: str = "All", purpose: Purpose = "test",
+    _snapshots: _ConfigurationSnapshots | None = None,
 ) -> CiPlan:
     """Plan independent image and Renovate jobs, or an explicit manual rebuild."""
     _image_ignores(purpose)
@@ -227,7 +315,7 @@ def create_ci_plan(
     renovate_changes = False
     if base_ref:
         changes = read_changes(root, base_ref)
-        tags = _affected_image_tags(variants, root, changes, purpose)
+        tags = _affected_image_tags(variants, root, changes, purpose, _snapshots)
         renovate_changes = changes.initial_push or any(
             path in RENOVATE_PATHS for path in changes.paths
         )
@@ -288,25 +376,13 @@ def is_candidate_superseded(variant: ImageVariant, root: Path) -> bool:
     if not re.fullmatch(r"[a-f0-9]{40}", variant["source_ref"]):
         raise PlanningError("Invalid candidate source commit")
     run_git(root, "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
-    # Retain other recipes' identities so their changes are not treated as unknown
-    # shared inputs. Keep the candidate itself even if the local inventory changed.
-    variants = [variant] + [entry for entry in load_variants(root)
-                            if entry["tagMinor"] != variant["tagMinor"]]
-    tags = affected_image_tags(
-        variants, root, variant["source_ref"], "refs/remotes/origin/main", purpose="publish"
-    )
-    if variant["tagMinor"] in tags:
+    changes = read_changes(root, variant["source_ref"], "refs/remotes/origin/main")
+    snapshots = _ConfigurationSnapshots(root)
+    current = snapshots.load(changes.head_commit).variants
+    configured = next((entry for entry in current if entry["tagMinor"] == variant["tagMinor"]), None)
+    if configured is None or set(configured["publishTags"]) != set(variant["publishTags"]):
         return True
-    if "latest" in variant.get("publishTags", []):
-        # A newer PHP minor can take latest without changing this minor's files.
-        # Resolve current main so a queued older candidate cannot move it back.
-        snapshot = subprocess.check_output(["git", "-C", str(root), "archive", "refs/remotes/origin/main"])
-        with tempfile.TemporaryDirectory() as directory:
-            with tarfile.open(fileobj=io.BytesIO(snapshot)) as archive:
-                archive.extractall(directory, filter="data")
-            current = load_image_variants(Path(directory), source_ref="")
-        return not any(entry["tagMinor"] == variant["tagMinor"] and "latest" in entry["publishTags"] for entry in current)
-    return False
+    return variant["tagMinor"] in _affected_image_tags(current, root, changes, "publish", snapshots)
 
 
 def _append_github_outputs(path: Path | None, values: Mapping[str, str]) -> None:
@@ -376,8 +452,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _append_github_outputs(args.github_output, {"superseded": str(superseded).lower()})
             print("Superseded" if superseded else "Current")
         else:
+            snapshots = _ConfigurationSnapshots(root)
+            configuration = snapshots.load(_resolve_commit(root, "HEAD"))
             plan = create_ci_plan(
-                load_variants(root), root, args.base_ref, php=args.php, purpose=args.purpose
+                configuration.variants, root, args.base_ref, php=args.php,
+                purpose=args.purpose, _snapshots=snapshots,
             )
             _write_plan(plan, args.out, args.github_output, args.summary)
     except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError) as error:
