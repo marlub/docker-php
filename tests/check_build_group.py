@@ -75,7 +75,9 @@ LABEL fixture.node="${NODE_BASE_IMAGE}"
                     hashes.append(value)
                     if hashes[0] != value:
                         raise AssertionError('A Node variant used different compiler artifacts')
-                with fresh_builder(context) as builder, patch('build_group.test_image', check_image):
+                with fresh_builder(context) as builder, patch('build_group.test_image', check_image), \
+                        patch('build_group.Registry') as registry:
+                    registry.return_value.manifest.return_value = None
                     request = {'group_id': 'fixture', 'source_ref': source, 'arch': 'amd64', 'run_attempt': '1',
                                'variants': selected, 'cache': asdict(CachePolicy('example.test/cache')),
                                'builder': builder, 'publish': name == 'all', 'no_cache': True, 'image': 'example.test/fixture'}

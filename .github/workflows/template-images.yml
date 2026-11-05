@@ -118,51 +118,22 @@ jobs:
         run: |
           python3 scripts/build_group.py extract --entry "$ENTRY" --attempt "$ATTEMPT" \
             --bundles "$RUNNER_TEMP/build-results" --out "$RUNNER_TEMP/digests"
-      - name: Verify candidate metadata
-        run: |
-          for arch in amd64 arm64; do
-            digest=$(cat "$RUNNER_TEMP/digests/$arch.digest")
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            docker buildx imagetools inspect "$IMAGE@$digest" --format '{{json .Image}}' |
-              python3 tests/verify_image.py --metadata --entry "$ENTRY" --platform "linux/$arch"
-          done
-      - name: Check current main
-        id: current
-        run: python3 scripts/plan_ci.py --check-current "$ENTRY" --github-output "$GITHUB_OUTPUT"
+      - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main
+        with:
+          release: v0.11.7
       - name: Publish and verify tags
-        if: steps.current.outputs.superseded == 'false'
+        id: publication
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
-          amd64=$(cat "$RUNNER_TEMP/digests/amd64.digest")
-          arm64=$(cat "$RUNNER_TEMP/digests/arm64.digest")
-          [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ && "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
-          # latest belongs to the newest PHP minor's default Debian image with the highest Node major.
-          tags_text=$(jq -er --arg minor "$TAG_MINOR" --arg patch "$TAG_PATCH" '
-            .publishTags | select(type == "array" and length >= 2) |
-            select(length == (unique | length)) |
-            select(all(.[]; type == "string" and test("^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$"))) |
-            select(index($minor) != null and index($patch) != null) | .[]
-          ' <<< "$ENTRY")
-          mapfile -t tags <<< "$tags_text"
-          tag_args=()
-          for tag in "${tags[@]}"; do tag_args+=(--tag "$IMAGE:$tag"); done
-          docker buildx imagetools create "${tag_args[@]}" "$IMAGE@$amd64" "$IMAGE@$arm64"
-          indexes=()
-          for tag in "${tags[@]}"; do
-            manifest=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest}}')
-            jq -e --arg amd64 "$amd64" --arg arm64 "$arm64" '
-              [.manifests[] | {platform: (.platform.os + "/" + .platform.architecture), digest}] | sort_by(.platform) ==
-              [{platform: "linux/amd64", digest: $amd64}, {platform: "linux/arm64", digest: $arm64}]
-            ' <<< "$manifest" > /dev/null
-            indexes+=("$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")")
-          done
-          for index in "${indexes[@]}"; do test "$index" = "${indexes[0]}"; done
+          python3 scripts/publication.py --entry "$ENTRY" --image "$IMAGE" --attempt "$ATTEMPT" \
+            --candidates "$RUNNER_TEMP/digests" --github-output "$GITHUB_OUTPUT"
       - name: Publication summary
         if: always()
         env:
           STATUS: ${{ job.status }}
-          SUPERSEDED: ${{ steps.current.outputs.superseded }}
+          RESULT: ${{ steps.publication.outputs.result }}
         run: |
           if [ "$STATUS" != success ]; then result=Failed
-          elif [ "$SUPERSEDED" = true ]; then result=Superseded
-          else result=Published; fi
+          else result="${RESULT:-Failed}"; fi
           printf '| Variant | Result |\n| --- | --- |\n| %s | %s |\n' "$TAG_MINOR" "$result" >> "$GITHUB_STEP_SUMMARY"

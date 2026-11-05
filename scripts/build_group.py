@@ -17,6 +17,8 @@ from typing import Mapping
 
 from image_config import ImageVariant
 from plan_ci import load_variants, prepare_build_group, run_git
+from publication import (Registry, content_digest, reusable_digest,
+                         validate_record, verify_config)
 
 ROOT = Path(__file__).resolve().parent.parent
 DIGEST = re.compile(r"sha256:[a-f0-9]{64}")
@@ -141,7 +143,7 @@ def test_image(commands: Commands, entry: ImageVariant, image: str, directory: P
     commands.run([sys.executable, "tests/verify_image.py", "--image", image, "--entry", json.dumps(entry)], directory / "versions.log")
 
 
-def transfer_image(commands: Commands, image: str, destination: str, directory: Path, config_id: str) -> str:
+def inspect_export(commands: Commands, image: str, directory: Path, config_id: str) -> tuple[str, dict]:
     oci = directory / "oci"
     oci.mkdir()
     with tarfile.open(directory / "image.tar") as archive:
@@ -155,12 +157,28 @@ def transfer_image(commands: Commands, image: str, destination: str, directory: 
     digest = manifests[0].get("digest", "")
     if not isinstance(digest, str) or DIGEST.fullmatch(digest) is None:
         raise ValueError("Malformed candidate image digest")
-    manifest = json.loads((oci / "blobs/sha256" / digest.removeprefix("sha256:")).read_text())
+    raw = (oci / "blobs/sha256" / digest.removeprefix("sha256:")).read_bytes()
+    if content_digest(raw) != digest:
+        raise ValueError("OCI candidate manifest digest mismatch")
+    manifest = json.loads(raw)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("config"), dict):
         raise ValueError("Malformed candidate image manifest")
     if manifest["config"].get("digest") != config_id or inspect_image(commands, image) != config_id:
         raise ValueError("OCI candidate does not match the tested image")
+    raw = (oci / "blobs/sha256" / config_id.removeprefix("sha256:")).read_bytes()
+    if content_digest(raw) != config_id:
+        raise ValueError("OCI candidate configuration digest mismatch")
+    return digest, json.loads(raw)
+
+
+def upload_export(commands: Commands, destination: str, directory: Path, digest: str) -> None:
+    oci = directory / "oci"
     commands.run(["regctl", "image", "copy", f"ocidir://{oci}@{digest}", f"{destination}@{digest}"], directory / "transfer.log")
+
+
+def transfer_image(commands: Commands, image: str, destination: str, directory: Path, config_id: str) -> str:
+    digest, _ = inspect_export(commands, image, directory, config_id)
+    upload_export(commands, destination, directory, digest)
     return digest
 
 
@@ -175,8 +193,10 @@ def write_bundle(path: Path, bundle: dict) -> None:
     temporary.replace(path)
 
 
-def run_group(request: dict, root: Path, directory: Path, commands: Commands | None = None) -> dict:
+def run_group(request: dict, root: Path, directory: Path, commands: Commands | None = None,
+              registry: Registry | None = None) -> dict:
     commands = commands or Commands(root)
+    registry = registry or Registry()
     directory.mkdir(parents=True, exist_ok=True)
     bundle = {key: request[key] for key in ("group_id", "source_ref", "arch", "run_attempt")}
     bundle["results"] = {v["tagMinor"]: {"status": "not-run"} for v in request["variants"]}
@@ -207,8 +227,15 @@ def run_group(request: dict, root: Path, directory: Path, commands: Commands | N
                 test_image(commands, entry, image, work)
                 if request["publish"]:
                     result["stage"] = "transfer"
-                    digest = transfer_image(commands, image, request["image"], work, config_id)
-                    result["digest"] = digest
+                    digest, tested = inspect_export(commands, image, work, config_id)
+                    verify_config(tested, entry, request["arch"])
+                    reused, warning = reusable_digest(registry, request["image"], entry, request["arch"], tested)
+                    if warning:
+                        result["comparison_warning"] = warning
+                    if reused is None:
+                        upload_export(commands, request["image"], work, digest)
+                    result.update(digest=reused or digest, publication="reused" if reused else "uploaded",
+                                  tested_config=tested)
                 result.update(status="success", stage="complete")
             except (subprocess.CalledProcessError, OSError, ValueError, RuntimeError) as error:
                 result["error"] = str(error)
@@ -225,9 +252,12 @@ def run_group(request: dict, root: Path, directory: Path, commands: Commands | N
         if summary:
             with Path(summary).open("a") as output:
                 output.write(f"### {request['group_id']} ({request['arch']})\n\n")
-                output.write("| Variant | Result | Last stage | Seconds |\n| --- | --- | --- | --- |\n")
+                output.write("| Variant | Result | Image | Last stage | Seconds |\n| --- | --- | --- | --- | --- |\n")
                 for tag, result in bundle["results"].items():
-                    output.write(f"| {tag} | {result['status']} | {result.get('stage', '')} | {result.get('seconds', '')} |\n")
+                    output.write(f"| {tag} | {result['status']} | {result.get('publication', '').title()} | "
+                                 f"{result.get('stage', '')} | {result.get('seconds', '')} |\n")
+                    if result.get("comparison_warning"):
+                        output.write(f"\n{tag}: {result['comparison_warning']}\n\n")
                 output.write("\n")
                 policy = CachePolicy(**request["cache"])
                 for tag in bundle["results"]:
@@ -240,7 +270,7 @@ def run_group(request: dict, root: Path, directory: Path, commands: Commands | N
     return bundle
 
 
-def selected_digest(bundle: dict, entry: ImageVariant, arch: str, attempt: str) -> str:
+def selected_record(bundle: dict, entry: ImageVariant, arch: str, attempt: str) -> dict:
     if not isinstance(bundle, dict) or not isinstance(bundle.get("results"), dict):
         raise ValueError("Malformed build result bundle")
     expected = {"group_id": entry["base_target"], "source_ref": entry["source_ref"], "arch": arch, "run_attempt": attempt}
@@ -252,7 +282,13 @@ def selected_digest(bundle: dict, entry: ImageVariant, arch: str, attempt: str) 
     digest = result.get("digest", "")
     if result.get("status") != "success" or not isinstance(digest, str) or DIGEST.fullmatch(digest) is None:
         raise ValueError(f"No successful tested candidate for {entry['tagMinor']} on {arch}")
-    return digest
+    record = {**result, **expected}
+    validate_record(record, entry, arch, attempt)
+    return record
+
+
+def selected_digest(bundle: dict, entry: ImageVariant, arch: str, attempt: str) -> str:
+    return selected_record(bundle, entry, arch, attempt)["digest"]
 
 
 def prepare_request(root: Path, env: Mapping[str, str]) -> tuple[dict, Path]:
@@ -311,11 +347,12 @@ def main() -> int:
             return int(any(result["status"] != "success" for result in bundle["results"].values()))
         else:
             entry = prepare_build_group([json.loads(args.entry)], load_variants(ROOT))[0]
-            digests = {arch: selected_digest(json.loads((args.bundles / arch / "results.json").read_text()), entry, arch, args.attempt)
+            records = {arch: selected_record(json.loads((args.bundles / arch / "results.json").read_text()), entry, arch, args.attempt)
                        for arch in ("amd64", "arm64")}
             args.out.mkdir(parents=True, exist_ok=True)
-            for arch, digest in digests.items():
-                (args.out / (arch + ".digest")).write_text(digest + "\n")
+            for arch, record in records.items():
+                (args.out / (arch + ".digest")).write_text(record["digest"] + "\n")
+                (args.out / (arch + ".json")).write_text(json.dumps(record, sort_keys=True) + "\n")
     except KeyboardInterrupt:
         print("Build group cancelled", file=sys.stderr)
         return 130

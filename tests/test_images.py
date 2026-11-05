@@ -372,132 +372,21 @@ class MetadataTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
 
-class PublicationStepTests(unittest.TestCase):
-    """Exercise the real workflow shell with a registry stub; no Docker daemon."""
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        (self.root / 'digests').mkdir()
-        (self.root / 'bin').mkdir()
-        self.entry = load_variants(ROOT)[0]
-        self.digests = {'amd64': digest('amd64'), 'arm64': digest('arm64')}
-        for arch, value in self.digests.items():
-            (self.root / 'digests' / (arch + '.digest')).write_text(value + '\n')
-            config = {'os': 'linux', 'architecture': arch, 'config': {'Labels': {
-                REVISION_LABEL: self.entry['source_ref'], VARIANT_LABEL: self.entry['tagMinor']}}}
-            (self.root / (arch + '.json')).write_text(json.dumps(config))
-        self.manifest = {'digest': digest('index'), 'manifests': [
-            {'platform': {'os': 'linux', 'architecture': arch}, 'digest': value} for arch, value in self.digests.items()]}
-        for tag in self.entry['publishTags']:
-            (self.root / (tag + '.json')).write_text(json.dumps(self.manifest))
-        docker = self.root / 'bin/docker'
-        docker.write_text("""#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-root = Path(os.environ['MOCK_ROOT'])
-with (root / 'calls').open('a') as log: log.write(json.dumps(sys.argv[1:]) + '\\n')
-if os.environ.get('REGISTRY_FAILURE'): sys.exit(9)
-if sys.argv[3] == 'create': sys.exit(8 if os.environ.get('CREATE_FAILURE') else 0)
-ref = sys.argv[4]
-if '@' in ref:
-    name = next(arch for arch in ('amd64', 'arm64') if (root / 'digests' / (arch + '.digest')).read_text().strip() == ref.split('@')[1])
-else:
-    name = ref.rsplit(':', 1)[1]
-print((root / (name + '.json')).read_text())
-""")
-        docker.chmod(0o755)
-        self.env = dict(os.environ, MOCK_ROOT=str(self.root), RUNNER_TEMP=str(self.root),
-                        PATH=str(self.root / 'bin') + os.pathsep + os.environ['PATH'],
-                        ENTRY=json.dumps(self.entry), IMAGE=IMAGE,
-                        TAG_MINOR=self.entry['tagMinor'], TAG_PATCH=self.entry['tagPatch'])
-
-    def run_step(self, name):
-        workflow = (ROOT / '.github/workflows/template-images.yml').read_text()
-        step = workflow.split('      - name: ' + name + '\n', 1)[1].split('\n      - ', 1)[0]
-        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
-        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=ROOT, env=self.env, capture_output=True, text=True)
-
-    def test_verified_candidates_publish_exact_digests(self):
-        result = self.run_step('Verify candidate metadata')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        result = self.run_step('Publish and verify tags')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = [json.loads(line) for line in (self.root / 'calls').read_text().splitlines()]
-        create = next(call for call in calls if call[2] == 'create')
-        self.assertEqual(create[3:-2], [part for tag in self.entry['publishTags'] for part in ('--tag', IMAGE + ':' + tag)])
-        self.assertEqual([call[3] for call in calls if call[2] == 'inspect' and '@' not in call[3]],
-                         [IMAGE + ':' + tag for tag in self.entry['publishTags']])
-        self.assertEqual(create[-2:], [IMAGE + '@' + self.digests[arch] for arch in ('amd64', 'arm64')])
-        self.assertNotIn('build', create)
-
-    def test_missing_and_malformed_digest_files_fail(self):
-        path = self.root / 'digests/arm64.digest'
-        original = path.read_text()
-        for value in ('invalid', original + original):
-            path.write_text(value)
-            self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
-            self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
-        path.unlink()
-        self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
-        self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
-
-    def test_candidate_identity_and_registry_errors_propagate(self):
-        path = self.root / 'arm64.json'
-        config = json.loads(path.read_text())
-        config['config']['Labels'][REVISION_LABEL] = 'wrong'
-        path.write_text(json.dumps(config))
-        self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
-        self.env['REGISTRY_FAILURE'] = '1'
-        self.assertNotEqual(self.run_step('Verify candidate metadata').returncode, 0)
-
-    def test_missing_duplicate_extra_and_wrong_manifest_children_fail(self):
-        for tag in self.entry['publishTags']:
-            for kind in ('missing', 'duplicate', 'extra', 'digest', 'index', 'index format', 'malformed'):
-                with self.subTest(tag=tag, kind=kind):
-                    self.check_bad_manifest(tag, kind)
-
-    def check_bad_manifest(self, tag, kind):
-        path = self.root / (tag + '.json')
-        try:
-            manifest = copy.deepcopy(self.manifest)
-            if kind == 'missing': manifest['manifests'].pop()
-            elif kind == 'duplicate': manifest['manifests'][1] = manifest['manifests'][0]
-            elif kind == 'extra': manifest['manifests'].append(manifest['manifests'][0])
-            elif kind == 'digest': manifest['manifests'][0]['digest'] = digest('wrong')
-            elif kind == 'index': manifest['digest'] = digest('other index')
-            elif kind == 'index format': manifest['digest'] = 'invalid'
-            path.write_text('not json' if kind == 'malformed' else json.dumps(manifest))
-            self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
-        finally:
-            path.write_text(json.dumps(self.manifest))
-
-    def test_invalid_publication_tag_lists_fail_before_registry_writes(self):
-        for tags in (None, [], [self.entry['tagMinor']], ['other', 'other'],
-                     [self.entry['tagMinor'], 'bad tag'], [self.entry['tagMinor'], '-bad'],
-                     [self.entry['tagMinor'], 'a' * 129], self.entry['publishTags'] + [None]):
-            with self.subTest(tags=tags):
-                self.env['ENTRY'] = json.dumps({**self.entry, 'publishTags': tags})
-                self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
-                self.assertFalse((self.root / 'calls').exists())
-
-    def test_debian_and_node_aliases_publish_without_extra_builds(self):
-        for entry in load_variants(ROOT):
-            with self.subTest(tag=entry['tagMinor']):
-                self.env.update(ENTRY=json.dumps(entry), TAG_MINOR=entry['tagMinor'], TAG_PATCH=entry['tagPatch'])
-                for tag in entry['publishTags']:
-                    (self.root / (tag + '.json')).write_text(json.dumps(self.manifest))
-                result = self.run_step('Publish and verify tags')
-                self.assertEqual(result.returncode, 0, result.stderr)
-                calls = [json.loads(line) for line in (self.root / 'calls').read_text().splitlines()]
-                create = next(call for call in reversed(calls) if call[2] == 'create')
-                self.assertEqual(create[3:-2], [part for tag in entry['publishTags'] for part in ('--tag', IMAGE + ':' + tag)])
-
-    def test_create_failure_stops_tag_verification(self):
-        self.env['CREATE_FAILURE'] = '1'
-        self.assertNotEqual(self.run_step('Publish and verify tags').returncode, 0)
-        calls = (self.root / 'calls').read_text().splitlines()
-        self.assertEqual(len(calls), 1)
+class PublicationWorkflowTests(unittest.TestCase):
+    def test_publication_uses_guard_and_reports_its_result(self):
+        from workflow_helpers import step_script, IMAGE_WORKFLOW
+        workflow = IMAGE_WORKFLOW.read_text().split('\n  publish:\n', 1)[1]
+        script = step_script(IMAGE_WORKFLOW, 'Publish and verify tags')
+        self.assertIn('python3 scripts/publication.py', script)
+        self.assertIn('--attempt "$ATTEMPT"', script)
+        self.assertIn('--candidates "$RUNNER_TEMP/digests"', script)
+        self.assertNotIn('no-cache', script)
+        self.assertNotIn('workflow_dispatch', script)
+        self.assertIn('release: v0.11.7', workflow)
+        summary = step_script(IMAGE_WORKFLOW, 'Publication summary')
+        self.assertIn('result=Failed', summary)
+        self.assertIn('result="${RESULT:-Failed}"', summary)
+        self.assertIn('RESULT: ${{ steps.publication.outputs.result }}', workflow)
 
 
 class VersionTests(unittest.TestCase):
@@ -582,7 +471,7 @@ class RenovateTests(unittest.TestCase):
                         matches+=list(re.finditer(expression,path.read_text()))
             counts.append(len(matches))
         self.assertEqual(counts[:3],[8,28,4])
-        self.assertEqual(counts[3:6], [1, 1, 0])
+        self.assertEqual(counts[3:6], [1, 2, 0])
         self.assertEqual(counts[6:], [len(json.loads((ROOT/f'build/{backend}/{release}/{arch}.json').read_text())['packages'])
                                     for backend, release in (('apk', '3.24'), ('apt', 'trixie'))
                                     for arch in ('amd64', 'arm64')])

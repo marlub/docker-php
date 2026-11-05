@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import io
 import json
 import os
@@ -17,21 +18,33 @@ from build_group import (CachePolicy, Commands, bake_command, main, prepare_requ
 from check_extension_cache import fresh_builder
 from variant_fixtures import add_family_variants
 from workflow_helpers import BUILD_ACTION, IMAGE_WORKFLOW, ROOT
+from test_publication import MemoryRegistry, image_config, encoded
+from publication import content_digest
 
 
 def digest(value):
     return 'sha256:' + hashlib.sha256(value.encode()).hexdigest()
 
 
-def write_oci(path, config_id, image_digest, manifests=None):
+def write_oci(path, config, manifests=None):
+    config_raw = encoded(config)
+    config_id = content_digest(config_raw)
+    manifest = encoded({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                                   "digest": config_id, "size": len(config_raw)},
+                        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": value, "size": 1}
+                                   for value in config["rootfs"]["diff_ids"]]})
+    image_digest = content_digest(manifest)
     files = {'index.json': {'manifests': manifests if manifests is not None else [{'digest': image_digest}]},
-             'blobs/sha256/' + image_digest.split(':')[1]: {'config': {'digest': config_id}}}
+             'blobs/sha256/' + image_digest.split(':')[1]: manifest,
+             'blobs/sha256/' + config_id.split(':')[1]: config_raw}
     with tarfile.open(path, 'w') as archive:
         for name, value in files.items():
-            data = json.dumps(value).encode()
+            data = value if isinstance(value, bytes) else json.dumps(value).encode()
             member = tarfile.TarInfo(name)
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
+    return config_id, image_digest
 
 
 class FakeCommands:
@@ -42,12 +55,17 @@ class FakeCommands:
         self.failures = failures or {}
         self.cancel = cancel
         self.current = ''
+        self.configuration = None
+        self.image_digests = {}
 
     def run(self, command, log):
         self.calls.append(command)
         stage = 'test'
         if command[:3] == ['docker', 'buildx', 'bake']:
             self.current = next(value.removeprefix('*.tags=') for value in command if value.startswith('*.tags='))
+            revision = next(value.split('=', 1)[1] for value in command if value.startswith('*.labels.org.opencontainers.image.revision='))
+            arch = next(value.split('/')[-1] for value in command if value.startswith('*.platform='))
+            self.configuration = image_config({'source_ref': revision, 'tagMinor': self.current.split(':', 1)[1]}, arch)
             stage = 'build'
         elif command[0] == 'regctl':
             stage = 'transfer'
@@ -60,11 +78,11 @@ class FakeCommands:
         if stage == 'build':
             oci = next((s.split('dest=', 1)[1] for s in command if s.startswith('*.output+=type=oci,dest=')), None)
             if oci:
-                write_oci(Path(oci), digest(self.current), digest('manifest-' + self.current))
+                _, self.image_digests[self.current] = write_oci(Path(oci), self.configuration)
 
     def capture(self, command):
         self.calls.append(command)
-        return digest(command[3])
+        return content_digest(encoded(self.configuration))
 
     @property
     def builds(self):
@@ -85,9 +103,9 @@ class GroupedBuildTests(RepositoryTests):
                 'variants': self.family if variants is None else variants, 'cache': {'image': 'example.test/cache', 'scope': 'main', 'merged_prs': [42]},
                 'builder': 'same-builder', 'publish': True, 'no_cache': forced, 'image': 'example.test/php'}
 
-    def run_controller(self, request, commands):
+    def run_controller(self, request, commands, registry=None):
         with patch('builtins.print'), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(self.directory / 'summary')}):
-            return run_group(request, self.root, self.directory, commands)
+            return run_group(request, self.root, self.directory, commands, registry or MemoryRegistry())
 
     def test_all_variants_share_builder_and_have_distinct_outputs_and_candidates(self):
         request = self.request()
@@ -101,7 +119,8 @@ class GroupedBuildTests(RepositoryTests):
         for entry in self.family:
             result = bundle['results'][entry['tagMinor']]
             self.assertEqual(result['status'], 'success')
-            self.assertEqual(result['digest'], digest('manifest-docker-php-ci:' + entry['tagMinor']))
+            self.assertEqual(result['digest'], commands.image_digests['docker-php-ci:' + entry['tagMinor']])
+            self.assertEqual(result['publication'], 'uploaded')
             self.assertFalse((self.directory / entry['tagMinor'] / 'image.tar').exists())
             self.assertFalse((self.directory / entry['tagMinor'] / 'oci').exists())
         self.assertEqual(json.loads((self.directory / 'results.json').read_text()), bundle)
@@ -123,6 +142,47 @@ class GroupedBuildTests(RepositoryTests):
                         else:
                             self.assertEqual(result['status'], 'success')
                             selected_digest(bundle, other, 'amd64', '2')
+
+    def test_equivalent_images_skip_upload_after_all_tests_including_forced_builds(self):
+        for forced in (False, True):
+            with self.subTest(forced=forced):
+                registry = MemoryRegistry()
+                children_by_tag = {}
+                for entry in self.family:
+                    children = {arch: registry.add_image(image_config(entry, arch, revision='b' * 40))
+                                for arch in ('amd64', 'arm64')}
+                    children_by_tag[entry['tagMinor']] = children
+                    registry.add_index(children, [entry['tagMinor']])
+                commands = FakeCommands(self.root)
+                bundle = self.run_controller(self.request(forced=forced), commands, registry)
+                self.assertFalse(any(command[0] == 'regctl' for command in commands.calls))
+                for entry in self.family:
+                    record = bundle['results'][entry['tagMinor']]
+                    self.assertEqual(record['publication'], 'reused')
+                    self.assertEqual(record['digest'], children_by_tag[entry['tagMinor']]['amd64'])
+                    self.assertEqual(record['tested_config']['config']['Labels']['org.opencontainers.image.revision'],
+                                     entry['source_ref'])
+                    tests = [command for command in commands.calls
+                             if command[0] in ('docker', 'tests/test_image.sh', sys.executable)
+                             and (('docker-php-ci:' + entry['tagMinor']) in command
+                                  or ('--image=docker-php-ci:' + entry['tagMinor']) in command)
+                             and command[1:3] != ['image', 'inspect']]
+                    self.assertEqual(len(tests), 4)
+                    self.assertFalse((self.directory / entry['tagMinor'] / 'image.tar').exists())
+
+    def test_comparison_error_uploads_tested_images_and_pr_runs_do_not_query_registry(self):
+        registry = MemoryRegistry()
+        for entry in self.family:
+            registry.errors[('manifest', 'get', 'example.test/php:' + entry['tagMinor'], '--format', 'raw-body')] = ValueError('bad metadata')
+        commands = FakeCommands(self.root)
+        bundle = self.run_controller(self.request(), commands, registry)
+        self.assertTrue(all(result['publication'] == 'uploaded' and result['comparison_warning']
+                            for result in bundle['results'].values()))
+        registry = MemoryRegistry()
+        request = {**self.request(), 'publish': False}
+        bundle = self.run_controller(request, FakeCommands(self.root), registry)
+        self.assertFalse(registry.calls)
+        self.assertTrue(all(result['status'] == 'success' and 'publication' not in result for result in bundle['results'].values()))
 
     def test_forced_node_only_groups_share_the_first_completed_php_build(self):
         nodes = self.family[1:]
@@ -202,7 +262,11 @@ class GroupedBuildTests(RepositoryTests):
         bundles = self.directory / 'downloads'
         for arch in ('amd64', 'arm64'):
             (bundles / arch).mkdir(parents=True)
-            (bundles / arch / 'results.json').write_text(json.dumps({**bundle, 'arch': arch}))
+            architecture_bundle = copy.deepcopy(bundle)
+            architecture_bundle['arch'] = arch
+            for result in architecture_bundle['results'].values():
+                result['tested_config']['architecture'] = arch
+            (bundles / arch / 'results.json').write_text(json.dumps(architecture_bundle))
         output = self.directory / 'digests'
         command = [sys.executable, str(self.root / 'scripts/build_group.py'), 'extract', '--entry', json.dumps(self.family[0]),
                    '--bundles', str(bundles), '--attempt', '2', '--out', str(output)]
@@ -239,6 +303,7 @@ class GroupedBuildTests(RepositoryTests):
                 handler = signal.getsignal(signal.SIGTERM)
                 try:
                     with patch('build_group.ROOT', self.root), patch('build_group.Commands', return_value=commands), \
+                         patch('build_group.Registry', return_value=MemoryRegistry()), \
                          patch('sys.argv', ['build_group.py', 'run', '--request', str(path)]), \
                          patch('builtins.print'), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(self.directory / 'summary')}):
                         self.assertEqual(main(), expected)
@@ -252,11 +317,11 @@ class CandidateTransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             image = 'docker-php-ci:8.4-fpm-alpine3.24'
-            config_id = digest(image)
-            image_digest = digest('manifest')
-            write_oci(directory / 'image.tar', config_id, image_digest)
+            config = image_config({'source_ref': 'a' * 40, 'tagMinor': image.split(':')[1]})
+            config_id, image_digest = write_oci(directory / 'image.tar', config)
             commands = FakeCommands(directory)
             commands.current = image
+            commands.configuration = config
             self.assertEqual(transfer_image(commands, image, 'example.test/php', directory, config_id), image_digest)
             self.assertEqual(commands.calls[-1][-1], 'example.test/php@' + image_digest)
 
@@ -265,12 +330,15 @@ class CandidateTransferTests(unittest.TestCase):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
                 directory = Path(temp)
                 image = 'docker-php-ci:8.4-fpm-alpine3.24'
-                write_oci(directory / 'image.tar', digest('other') if failure == 'config' else digest(image),
-                          digest('manifest'), manifests=[] if failure == 'manifest' else [None] if failure == 'malformed' else None)
+                config = image_config({'source_ref': 'a' * 40, 'tagMinor': image.split(':')[1]})
+                exported = {**config, 'author': 'other'} if failure == 'config' else config
+                write_oci(directory / 'image.tar', exported,
+                          manifests=[] if failure == 'manifest' else [None] if failure == 'malformed' else None)
                 commands = FakeCommands(directory, {image.split(':')[1]: failure})
                 commands.current = image
+                commands.configuration = config
                 with self.assertRaises((ValueError, subprocess.CalledProcessError)):
-                    transfer_image(commands, image, 'example.test/php', directory, digest(image))
+                    transfer_image(commands, image, 'example.test/php', directory, content_digest(encoded(config)))
 
     def test_disposable_builder_is_removed_after_failed_image_checks(self):
         with tempfile.TemporaryDirectory() as temp, patch('check_extension_cache.subprocess.run') as run:
@@ -297,7 +365,7 @@ class WorkflowGuardsTests(unittest.TestCase):
         self.assertNotIn('needs.build-and-test.result', publish)
         for arch in ('amd64', 'arm64'):
             self.assertIn('name: build-results-${{ matrix.variant.base_target }}-' + arch + '-attempt-${{ github.run_attempt }}', publish)
-        self.assertLess(publish.index('Require successful candidates from this attempt'), publish.index('Verify candidate metadata'))
+        self.assertLess(publish.index('Require successful candidates from this attempt'), publish.index('Publish and verify tags'))
         action = BUILD_ACTION.read_text()
         self.assertIn("if: ${{ !cancelled() && inputs.publish == 'true' && steps.prepare.outcome == 'success' }}", action)
         self.assertIn('build-results-${{ steps.prepare.outputs.id }}-${{ inputs.arch }}-attempt-${{ github.run_attempt }}', action)

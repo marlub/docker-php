@@ -32,10 +32,13 @@ class ConfigurationSelectionTests(RepositoryTests):
                 self.assertEqual(grouped, plan['phpimages'])
         return plan
 
-    def change_image_pin(self, tag, field='php_image', digest='f' * 64):
+    def change_image_pin(self, tag, field='php_image'):
         entry = next(entry for entry in self.entries() if entry['tagMinor'] == tag)
         path = self.root / entry['bake_file']
         old = entry[field]
+        current_digest = old.split('@sha256:')[1]
+        # Always change the fixture pin, including when the repository updates it.
+        digest = ('0' if current_digest[0] != '0' else '1') + current_digest[1:]
         updated = old.split('@')[0] + '@sha256:' + digest
         self.assertNotEqual(old, updated)
         self.assertIn(old, path.read_text())
@@ -54,14 +57,25 @@ class ConfigurationSelectionTests(RepositoryTests):
 
     def test_reported_trixie_digest_update_selects_only_its_two_variants(self):
         candidates = self.entries()
-        self.change_image_pin('8.5-fpm-trixie',
-                              digest='c34bcf437ed61bd5e4c1114494eaf1ffd54253bce2b95d263bfa18b350ee8432')
+        self.change_image_pin('8.5-fpm-trixie')
         self.commit()
         plan = self.assert_selected(self.fixture_ref, {'8.5-fpm-trixie', '8.5-fpm-trixie-node24'})
         self.assertEqual([group['id'] for group in plan['buildgroups']], ['php-8-5-trixie'])
         for candidate in candidates:
             if candidate['minor'] == '8.5':
                 self.assertEqual(is_candidate_superseded(candidate, self.root), candidate['distribution'] == 'debian')
+
+    def test_repeated_pin_updates_remain_independent_of_existing_digests(self):
+        for tag, field, expected in (
+            ('8.5-fpm-trixie', 'php_image', {'8.5-fpm-trixie', '8.5-fpm-trixie-node24'}),
+            ('8.4-fpm-alpine3.24-node26', 'node_image', {'8.4-fpm-alpine3.24-node26'}),
+        ):
+            for update in range(2):
+                with self.subTest(tag=tag, update=update):
+                    before = self.git('rev-parse', 'HEAD')
+                    self.change_image_pin(tag, field)
+                    self.commit()
+                    self.assert_selected(before, expected)
 
     def test_php_pins_are_independent_for_every_os_release(self):
         for release, tag in (('3.23', '8.4-fpm-alpine3.23'), ('3.24', '8.4-fpm-alpine3.24'),
