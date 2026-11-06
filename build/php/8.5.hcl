@@ -1,7 +1,7 @@
 variable "PHP_8_5" {
   type = map(string)
   default = {
-    PHP_BASE_IMAGE = "php:8.5.12-fpm-alpine3.24@sha256:4c2818074ec49f6abe46620f3965e0cb75bc3a5f2b417edd1aacaba6f091c40e"
+    PHP_BASE_IMAGE = "php:8.5.12-fpm-alpine3.24@sha256:64535609509e0fd5c8529359e6b599a68ce42089defd565f7881efdae7687cea"
     EXTENSIONS = "bcmath gd exif intl calendar ldap zip pcntl sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof opentelemetry grpc protobuf"
     PACKAGES = ""
     # renovate: datasource=packagist depName=phpredis/phpredis
