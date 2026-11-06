@@ -1,9 +1,12 @@
 import copy
+import ast
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 import io
 import json
 from pathlib import Path
 import sys
+import re
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -238,6 +241,29 @@ class RebaseQueueTests(unittest.TestCase):
         self.reconcile(api)
         self.assertEqual(api.requested(), [1])
 
+    def test_default_codeql_pr_ref_failure_releases_the_slot(self):
+        api = FakeAPI()
+        self.reconcile(api)
+        api.refresh(1)
+        codeql = run(api.pulls[1], workflow=2)
+        codeql.update(path='dynamic/github-code-scanning/codeql', head_branch='refs/pull/1/head')
+        api.runs.append(codeql)
+        self.reconcile(api)
+        self.assertEqual(api.requested(), [1, 2])
+
+    def test_other_pr_refs_and_image_workflows_with_pr_refs_are_ignored(self):
+        for path, branch in (
+            ('dynamic/github-code-scanning/codeql', 'refs/pull/2/head'),
+            ('.github/workflows/build-test.yml', 'refs/pull/1/head'),
+        ):
+            with self.subTest(path=path, branch=branch):
+                api = FakeAPI()
+                self.reconcile(api)
+                api.refresh(1, status='completed', conclusion='failure')
+                api.runs[0].update(path=path, head_branch=branch)
+                self.reconcile(api)
+                self.assertEqual(api.requested(), [1])
+
     def test_excludes_ineligible_clean_conflicted_and_unknown_prs(self):
         changes = [
             lambda p: p.update(draft=True),
@@ -470,13 +496,47 @@ class QueueWorkflowTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/renovate-rebase-queue.yml').read_text()
         self.assertIn('  push:\n    branches: [main]', workflow)
         self.assertIn('  pull_request_target:', workflow)
-        self.assertIn("    workflows: ['*', '!Renovate rebase queue']\n    types: [completed]", workflow)
+        self.assertIn("    workflows: ['Test PHP images with extensions', 'CodeQL', 'PR #*']", workflow)
+        self.assertIn("    branches: ['renovate/**', 'refs/pull/*/head']", workflow)
+        self.assertIn('    types: [completed]', workflow)
         self.assertNotIn('  schedule:', workflow)
-        self.assertIn('  group: renovate-rebase-queue\n  cancel-in-progress: false\n  queue: max', workflow)
+        self.assertIn('  group: renovate-rebase-queue\n  cancel-in-progress: false', workflow)
+        self.assertNotIn('  queue: max', workflow)
         self.assertIn('  contents: read\n  actions: read\n  pull-requests: write\n  issues: write', workflow)
         self.assertIn('ref: ${{ github.event.repository.default_branch }}', workflow)
         self.assertIn('persist-credentials: false', workflow)
-        self.assertNotIn('github.event.pull_request.head', workflow)
+        self.assertNotIn('ref: ${{ github.event.pull_request.head', workflow)
+        self.assertIn("github.event.pull_request.user.login == 'renovate[bot]'", workflow)
+        self.assertIn("github.event.action != 'closed' || github.event.pull_request.merged != true", workflow)
+
+    def test_completion_filters_exclude_queue_publication_cleanup_and_main(self):
+        workflow = (ROOT / '.github/workflows/renovate-rebase-queue.yml').read_text()
+        section = workflow.split('  workflow_run:', 1)[1].split('  workflow_dispatch:', 1)[0]
+        names = ast.literal_eval(re.search(r'^    workflows: (.+)$', section, re.M)[1])
+        branches = ast.literal_eval(re.search(r'^    branches: (.+)$', section, re.M)[1])
+        for name, branch, expected in (
+            ('Test PHP images with extensions', 'renovate/php82-php', True),
+            ('PR #68', 'refs/pull/68/head', True),
+            ('CodeQL', 'renovate/php82-php', True),
+            ('Renovate rebase queue', 'main', False),
+            ('Renovate rebase queue', 'renovate/php82-php', False),
+            ('Build & publish PHP images with extensions', 'main', False),
+            ('Clean up registry build caches', 'renovate/php82-php', False),
+            ('Push on main', 'main', False),
+            ('Test PHP images with extensions', 'feature/human-pr', False),
+        ):
+            with self.subTest(name=name, branch=branch):
+                matches = any(fnmatchcase(name, pattern) for pattern in names) and any(
+                    fnmatchcase(branch, pattern) for pattern in branches)
+                self.assertEqual(matches, expected)
+
+    def test_pr_triggers_exclude_metadata_and_ci_duplicate_events(self):
+        workflow = (ROOT / '.github/workflows/renovate-rebase-queue.yml').read_text()
+        section = workflow.split('  pull_request_target:', 1)[1].split('  workflow_run:', 1)[0]
+        events = re.search(r'^    types: \[(.+)\]$', section, re.M)[1].split(', ')
+        self.assertEqual(set(events), {'closed', 'ready_for_review', 'converted_to_draft',
+                                       'auto_merge_enabled', 'auto_merge_disabled'})
+        self.assertTrue(set(events).isdisjoint({'opened', 'reopened', 'edited', 'labeled', 'unlabeled', 'synchronize'}))
 
 
 if __name__ == '__main__':

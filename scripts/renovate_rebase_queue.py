@@ -235,8 +235,13 @@ class RebaseQueue:
         query = urlencode({"head_sha": head})
         latest = {}
         for run in self.pages(f"/actions/runs?{query}", "workflow_runs"):
-            if (run.get("head_sha") != head or run.get("head_branch") != pull["head"]["ref"]
-                    or run.get("path", "").split("@", 1)[0] not in CI_PATHS):
+            path = run.get("path", "").split("@", 1)[0]
+            branches = {pull["head"]["ref"]}
+            if path == "dynamic/github-code-scanning/codeql":
+                # Default-setup CodeQL runs use a PR ref, unlike ordinary PR workflows.
+                branches.add(f"refs/pull/{pull['number']}/head")
+            if (run.get("head_sha") != head or run.get("head_branch") not in branches
+                    or path not in CI_PATHS):
                 continue
             # GET /actions/runs returns the latest attempt of a run, including reruns in progress.
             key = run["workflow_id"]
