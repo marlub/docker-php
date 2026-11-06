@@ -30,7 +30,13 @@ PR_IGNORED_PATHS = (
     ".github/workflows/cache-cleanup.yml", "scripts/cleanup_registry_cache.py",
 )
 RENOVATE_PATHS = ("renovate.json", ".github/workflows/template-renovate.yml")
-IMAGE_TEST_IGNORED_PATHS = PR_IGNORED_PATHS + RENOVATE_PATHS
+QUEUE_PATHS = (
+    ".github/workflows/renovate-rebase-queue.yml",
+    "scripts/renovate_rebase_queue.py",
+    "scripts/github_api.py",
+    "tests/test_renovate_rebase_queue.py",
+)
+IMAGE_TEST_IGNORED_PATHS = PR_IGNORED_PATHS + RENOVATE_PATHS + QUEUE_PATHS
 PUBLICATION_IGNORED_PATHS = IMAGE_TEST_IGNORED_PATHS + (
     "tests/**",
     "scripts/plan_ci.py",

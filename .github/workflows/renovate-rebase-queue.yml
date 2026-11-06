@@ -1,0 +1,38 @@
+name: Renovate rebase queue
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, closed, edited, labeled, unlabeled, ready_for_review, converted_to_draft, auto_merge_enabled, auto_merge_disabled]
+  workflow_run:
+    workflows: ['*', '!Renovate rebase queue']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: renovate-rebase-queue
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # This workflow has write permissions. Never execute PR code or artifacts.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Reconcile the single active rebase request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/renovate_rebase_queue.py --repository "$GITHUB_REPOSITORY" --summary "$GITHUB_STEP_SUMMARY"

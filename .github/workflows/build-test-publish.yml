@@ -20,6 +20,9 @@ on:
       - LICENSE
       - .github/workflows/cache-cleanup.yml
       - scripts/cleanup_registry_cache.py
+      - .github/workflows/renovate-rebase-queue.yml
+      - scripts/renovate_rebase_queue.py
+      - scripts/github_api.py
       - renovate.json
       - .github/workflows/template-renovate.yml
       - tests/**

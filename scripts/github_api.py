@@ -1,4 +1,4 @@
-"""Small authenticated REST client shared by CI cache maintenance tools."""
+"""Small authenticated REST client shared by CI maintenance tools."""
 
 import json
 from urllib.error import HTTPError
@@ -14,13 +14,18 @@ class GitHubAPI:
         self.token = token
         self.api_url = api_url.rstrip("/")
 
-    def request(self, method, path, *, missing_ok=False):
-        request = Request(self.api_url + path, method=method, headers={
+    def request(self, method, path, *, missing_ok=False, body=None):
+        headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "docker-php-build-cache",
-        })
+        }
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = Request(self.api_url + path, data=data, method=method, headers=headers)
         try:
             with urlopen(request, timeout=30) as response:
                 body = response.read()
