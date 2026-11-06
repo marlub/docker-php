@@ -495,9 +495,9 @@ class QueueWorkflowTests(unittest.TestCase):
     def test_events_permissions_and_trusted_checkout(self):
         workflow = (ROOT / '.github/workflows/renovate-rebase-queue.yml').read_text()
         self.assertIn('  push:\n    branches: [main]', workflow)
-        self.assertIn('  pull_request_target:', workflow)
-        self.assertIn("    workflows: ['Test PHP images with extensions', 'CodeQL', 'PR #*']", workflow)
-        self.assertIn("    branches: ['renovate/**', 'refs/pull/*/head']", workflow)
+        self.assertNotIn('  pull_request_target:', workflow)
+        self.assertIn("    workflows: ['Test PHP images with extensions']", workflow)
+        self.assertIn("    branches: ['renovate/**']", workflow)
         self.assertIn('    types: [completed]', workflow)
         self.assertNotIn('  schedule:', workflow)
         self.assertIn('  group: renovate-rebase-queue\n  cancel-in-progress: false', workflow)
@@ -506,8 +506,8 @@ class QueueWorkflowTests(unittest.TestCase):
         self.assertIn('ref: ${{ github.event.repository.default_branch }}', workflow)
         self.assertIn('persist-credentials: false', workflow)
         self.assertNotIn('ref: ${{ github.event.pull_request.head', workflow)
-        self.assertIn("github.event.pull_request.user.login == 'renovate[bot]'", workflow)
-        self.assertIn("github.event.action != 'closed' || github.event.pull_request.merged != true", workflow)
+        self.assertIn("github.event.workflow_run.path == '.github/workflows/build-test.yml'", workflow)
+        self.assertNotIn('github.event.workflow_run.conclusion', workflow)
 
     def test_completion_filters_exclude_queue_publication_cleanup_and_main(self):
         workflow = (ROOT / '.github/workflows/renovate-rebase-queue.yml').read_text()
@@ -516,8 +516,8 @@ class QueueWorkflowTests(unittest.TestCase):
         branches = ast.literal_eval(re.search(r'^    branches: (.+)$', section, re.M)[1])
         for name, branch, expected in (
             ('Test PHP images with extensions', 'renovate/php82-php', True),
-            ('PR #68', 'refs/pull/68/head', True),
-            ('CodeQL', 'renovate/php82-php', True),
+            ('PR #68', 'refs/pull/68/head', False),
+            ('CodeQL', 'renovate/php82-php', False),
             ('Renovate rebase queue', 'main', False),
             ('Renovate rebase queue', 'renovate/php82-php', False),
             ('Build & publish PHP images with extensions', 'main', False),
@@ -530,13 +530,11 @@ class QueueWorkflowTests(unittest.TestCase):
                     fnmatchcase(branch, pattern) for pattern in branches)
                 self.assertEqual(matches, expected)
 
-    def test_pr_triggers_exclude_metadata_and_ci_duplicate_events(self):
+    def test_queue_has_only_main_push_validation_completion_and_manual_triggers(self):
         workflow = (ROOT / '.github/workflows/renovate-rebase-queue.yml').read_text()
-        section = workflow.split('  pull_request_target:', 1)[1].split('  workflow_run:', 1)[0]
-        events = re.search(r'^    types: \[(.+)\]$', section, re.M)[1].split(', ')
-        self.assertEqual(set(events), {'closed', 'ready_for_review', 'converted_to_draft',
-                                       'auto_merge_enabled', 'auto_merge_disabled'})
-        self.assertTrue(set(events).isdisjoint({'opened', 'reopened', 'edited', 'labeled', 'unlabeled', 'synchronize'}))
+        section = workflow.split('\non:\n', 1)[1].split('\npermissions:', 1)[0]
+        events = re.findall(r'^  ([a-z_]+):$', section, re.M)
+        self.assertEqual(events, ['push', 'workflow_run', 'workflow_dispatch'])
 
 
 if __name__ == '__main__':

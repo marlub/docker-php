@@ -3,15 +3,11 @@ name: Renovate rebase queue
 on:
   push:
     branches: [main]
-  pull_request_target:
-    branches: [main]
-    # Branch updates are handled when their CI completes, not once per PR edit/label change.
-    types: [closed, ready_for_review, converted_to_draft, auto_merge_enabled, auto_merge_disabled]
   workflow_run:
-    # Explicit names prevent queue, publication, and cleanup completions from starting another run.
-    # GitHub's default CodeQL setup names its PR runs "PR #<number>".
-    workflows: ['Test PHP images with extensions', 'CodeQL', 'PR #*']
-    branches: ['renovate/**', 'refs/pull/*/head']
+    # "Validate build outcome" is the final aggregate job in this parent workflow.
+    # Successful completions also matter if main advanced while this PR was testing.
+    workflows: ['Test PHP images with extensions']
+    branches: ['renovate/**']
     types: [completed]
   workflow_dispatch:
 
@@ -31,14 +27,9 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_target' &&
-       github.event.pull_request.user.login == 'renovate[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       (github.event.action != 'closed' || github.event.pull_request.merged != true)) ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
-       (github.event.workflow_run.path == '.github/workflows/build-test.yml' ||
-        github.event.workflow_run.path == 'dynamic/github-code-scanning/codeql'))
+       github.event.workflow_run.path == '.github/workflows/build-test.yml')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
