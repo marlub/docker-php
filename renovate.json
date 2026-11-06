@@ -25,6 +25,19 @@
       "automerge": true
     },
     {
+      "description": "Update the Renovate CI validator during a weekly window",
+      "matchDatasources": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "renovate"
+      ],
+      "timezone": "Europe/Berlin",
+      "schedule": [
+        "* * * * 1"
+      ]
+    },
+    {
       "matchFileNames": [
         "build/php/8.2.hcl"
       ],
