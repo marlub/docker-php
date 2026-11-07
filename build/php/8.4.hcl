@@ -13,7 +13,7 @@ variable "PHP_8_4" {
     # renovate: datasource=packagist depName=pecl/pcov
     PCOV_VERSION = "1.0.12"
     # renovate: datasource=packagist depName=open-telemetry/ext-opentelemetry
-    OPENTELEMETRY_VERSION = "1.4.2"
+    OPENTELEMETRY_VERSION = "1.5.0"
     # renovate: datasource=packagist depName=grpc/grpc-php-ext
     GRPC_VERSION = "1.85.1"
     # renovate: datasource=packagist depName=extport/protobuf
