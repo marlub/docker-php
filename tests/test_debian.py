@@ -28,10 +28,14 @@ class DebianTests(RepositoryTests):
 
     def test_debian_recipe_and_node_changes_select_only_matching_images(self):
         path = self.root / 'Dockerfile.debian'
-        for before, after, count in [('node:24.22.2-', 'node:24.999.0-', 4),
+        for before, after, count in [(r'node:24\.\d+\.\d+-', 'node:24.999.0-', 4),
                                      ('RUN cp ', 'RUN cp -v ', 8)]:
             base = self.git('rev-parse', 'HEAD')
-            path.write_text(path.read_text().replace(before, after, 1))
+            original = path.read_text()
+            updated, replacements = re.subn(before, after, original, count=1)
+            self.assertEqual(replacements, 1)
+            self.assertNotEqual(updated, original)
+            path.write_text(updated)
             self.commit()
             for purpose in ('test', 'publish'):
                 selected = create_ci_plan(self.entries(), self.root, base, purpose=purpose)['phpimages']

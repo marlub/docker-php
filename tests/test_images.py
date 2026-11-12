@@ -145,18 +145,22 @@ class SelectionTests(RepositoryTests):
 
     def test_per_minor_pins_are_independent(self):
         original = self.entries()
+        expected = {entry['tagMinor']: dict(entry['extension_versions']) for entry in original}
         for minor in ('8.2', '8.3', '8.4', '8.5'):
             before = self.git('rev-parse', 'HEAD')
             self.change_arg(minor, 'REDIS_VERSION', '6.3.99')
             self.commit()
             entries = self.entries()
             self.assertEqual(len(affected_image_tags(entries, self.root, before)), 4)
-            self.assertEqual(next(e for e in entries if e['minor'] == minor)['extension_versions']['redis'], '6.3.99')
-        self.assertEqual(original[0]['extension_versions']['redis'], '6.3.0')
+            for entry in entries:
+                if entry['minor'] == minor:
+                    expected[entry['tagMinor']]['redis'] = '6.3.99'
+            self.assertEqual({entry['tagMinor']: entry['extension_versions'] for entry in entries}, expected)
 
     def test_new_minor_can_exclude_an_unsupported_extension(self):
         content = (self.root / 'build/php/8.5.hcl').read_text()
-        content = content.replace('PHP_8_5', 'PHP_8_6').replace('php-8-5', 'php-8-6').replace('ci-8-5', 'ci-8-6').replace('php:8.5.12-', 'php:8.6.0-').replace('docker-php:8.5-', 'docker-php:8.6-')
+        content = content.replace('PHP_8_5', 'PHP_8_6').replace('php-8-5', 'php-8-6').replace('ci-8-5', 'ci-8-6').replace('docker-php:8.5-', 'docker-php:8.6-')
+        content = re.sub(r'php:8\.5\.\d+-', 'php:8.6.0-', content)
         path = self.root / 'build/php/8.6.hcl'
         path.write_text(content)
         extensions = self.entries()[-1]['extensions'].split()

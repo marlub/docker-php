@@ -54,7 +54,7 @@ class ReleaseAliasTests(RepositoryTests):
         self.assertTrue(all('latest' not in e['publishTags'] for e in create_ci_plan(entries, self.root, php='8.4')['phpimages']))
         source = (self.root / 'build/php/8.5.hcl').read_text()
         source = source.replace('PHP_8_5', 'PHP_8_10').replace('php-8-5', 'php-8-10').replace('ci-8-5', 'ci-8-10')
-        source = source.replace('php:8.5.12-', 'php:8.10.0-').replace('docker-php:8.5-', 'docker-php:8.10-')
+        source = re.sub(r'php:8\.5\.\d+-', 'php:8.10.0-', source).replace('docker-php:8.5-', 'docker-php:8.10-')
         (self.root / 'build/php/8.10.hcl').write_text(source)
         self.commit()
         owners = [e for e in self.entries() if 'latest' in e['publishTags']]
