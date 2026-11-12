@@ -15,7 +15,7 @@ variable "PHP_8_2" {
     # renovate: datasource=packagist depName=open-telemetry/ext-opentelemetry
     OPENTELEMETRY_VERSION = "1.5.0"
     # renovate: datasource=packagist depName=grpc/grpc-php-ext
-    GRPC_VERSION = "1.85.1"
+    GRPC_VERSION = "1.85.2"
     # renovate: datasource=packagist depName=extport/protobuf
     PROTOBUF_VERSION = "36.2.0.1"
     PROTOBUF_MODULE_VERSION = "5.36.2"
