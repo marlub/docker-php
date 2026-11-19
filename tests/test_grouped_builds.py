@@ -49,8 +49,9 @@ def write_oci(path, config, manifests=None):
 
 class FakeCommands:
     """Emulate external commands while exercising the actual controller and OCI validation."""
-    def __init__(self, root, failures=None, cancel=None):
+    def __init__(self, root, failures=None, cancel=None, containerd=False):
         self.root = root
+        self.containerd = containerd
         self.calls = []
         self.failures = failures or {}
         self.cancel = cancel
@@ -82,6 +83,9 @@ class FakeCommands:
 
     def capture(self, command):
         self.calls.append(command)
+        if self.containerd:
+            # The containerd image store reports the manifest digest as the image ID.
+            return self.image_digests[self.current]
         return content_digest(encoded(self.configuration))
 
     @property
@@ -106,6 +110,13 @@ class GroupedBuildTests(RepositoryTests):
     def run_controller(self, request, commands, registry=None):
         with patch('builtins.print'), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(self.directory / 'summary')}):
             return run_group(request, self.root, self.directory, commands, registry or MemoryRegistry())
+
+    def test_publication_succeeds_with_containerd_image_store(self):
+        commands = FakeCommands(self.root, containerd=True)
+        bundle = self.run_controller(self.request(), commands)
+        for tag, result in bundle['results'].items():
+            self.assertEqual(result['status'], 'success', result.get('error'))
+            self.assertEqual(result['digest'], commands.image_digests['docker-php-ci:' + tag])
 
     def test_all_variants_share_builder_and_have_distinct_outputs_and_candidates(self):
         request = self.request()
@@ -324,6 +335,34 @@ class CandidateTransferTests(unittest.TestCase):
             commands.configuration = config
             self.assertEqual(transfer_image(commands, image, 'example.test/php', directory, config_id), image_digest)
             self.assertEqual(commands.calls[-1][-1], 'example.test/php@' + image_digest)
+
+    def test_transfer_accepts_containerd_store_manifest_digest_as_image_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            image = 'docker-php-ci:8.4-fpm-alpine3.24'
+            config = image_config({'source_ref': 'a' * 40, 'tagMinor': image.split(':')[1]})
+            _, image_digest = write_oci(directory / 'image.tar', config)
+            commands = FakeCommands(directory, containerd=True)
+            commands.current = image
+            commands.configuration = config
+            commands.image_digests[image] = image_digest
+            self.assertEqual(transfer_image(commands, image, 'example.test/php', directory, image_digest), image_digest)
+            self.assertEqual(commands.calls[-1][-1], 'example.test/php@' + image_digest)
+
+    def test_image_id_matching_neither_manifest_nor_config_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            image = 'docker-php-ci:8.4-fpm-alpine3.24'
+            config = image_config({'source_ref': 'a' * 40, 'tagMinor': image.split(':')[1]})
+            write_oci(directory / 'image.tar', config)
+            other = digest('other image')
+            commands = FakeCommands(directory, containerd=True)
+            commands.current = image
+            commands.configuration = config
+            commands.image_digests[image] = other
+            with self.assertRaisesRegex(ValueError, 'does not match the tested image'):
+                transfer_image(commands, image, 'example.test/php', directory, other)
+            self.assertFalse(any(call[0] == 'regctl' for call in commands.calls))
 
     def test_wrong_config_ambiguous_manifest_and_failed_upload_are_rejected(self):
         for failure in ('config', 'manifest', 'malformed', 'transfer'):

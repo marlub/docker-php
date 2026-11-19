@@ -126,7 +126,7 @@ class Commands:
 def inspect_image(commands: Commands, image: str) -> str:
     config = commands.capture(["docker", "image", "inspect", image, "--format", "{{.Id}}"])
     if DIGEST.fullmatch(config) is None:
-        raise ValueError("Invalid loaded image configuration digest")
+        raise ValueError("Invalid loaded image ID")
     return config
 
 
@@ -143,7 +143,12 @@ def test_image(commands: Commands, entry: ImageVariant, image: str, directory: P
     commands.run([sys.executable, "tests/verify_image.py", "--image", image, "--entry", json.dumps(entry)], directory / "versions.log")
 
 
-def inspect_export(commands: Commands, image: str, directory: Path, config_id: str) -> tuple[str, dict]:
+def inspect_export(commands: Commands, image: str, directory: Path, image_id: str) -> tuple[str, dict]:
+    """Return the exported manifest digest and config if they are the image loaded and tested.
+
+    The classic Docker image store reports the config digest as the image ID; the containerd
+    image store reports the manifest digest instead. Either identifies exactly one manifest.
+    """
     oci = directory / "oci"
     oci.mkdir()
     with tarfile.open(directory / "image.tar") as archive:
@@ -163,7 +168,10 @@ def inspect_export(commands: Commands, image: str, directory: Path, config_id: s
     manifest = json.loads(raw)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("config"), dict):
         raise ValueError("Malformed candidate image manifest")
-    if manifest["config"].get("digest") != config_id or inspect_image(commands, image) != config_id:
+    config_id = manifest["config"].get("digest")
+    if not isinstance(config_id, str) or DIGEST.fullmatch(config_id) is None:
+        raise ValueError("Malformed candidate image configuration digest")
+    if image_id not in (config_id, digest) or inspect_image(commands, image) != image_id:
         raise ValueError("OCI candidate does not match the tested image")
     raw = (oci / "blobs/sha256" / config_id.removeprefix("sha256:")).read_bytes()
     if content_digest(raw) != config_id:
@@ -176,8 +184,8 @@ def upload_export(commands: Commands, destination: str, directory: Path, digest:
     commands.run(["regctl", "image", "copy", f"ocidir://{oci}@{digest}", f"{destination}@{digest}"], directory / "transfer.log")
 
 
-def transfer_image(commands: Commands, image: str, destination: str, directory: Path, config_id: str) -> str:
-    digest, _ = inspect_export(commands, image, directory, config_id)
+def transfer_image(commands: Commands, image: str, destination: str, directory: Path, image_id: str) -> str:
+    digest, _ = inspect_export(commands, image, directory, image_id)
     upload_export(commands, destination, directory, digest)
     return digest
 
@@ -220,14 +228,14 @@ def run_group(request: dict, root: Path, directory: Path, commands: Commands | N
                 print("Cache settings: " + "; ".join(policy.settings(tag, request["arch"], no_cache=request["no_cache"])), flush=True)
                 commands.run(bake_command(entry, request, work, fresh_php=fresh_php), work / "build.log")
                 image = "docker-php-ci:" + tag
-                config_id = inspect_image(commands, image)
+                image_id = inspect_image(commands, image)
                 result["built"] = True
                 fresh_php = True
                 result["stage"] = "test"
                 test_image(commands, entry, image, work)
                 if request["publish"]:
                     result["stage"] = "transfer"
-                    digest, tested = inspect_export(commands, image, work, config_id)
+                    digest, tested = inspect_export(commands, image, work, image_id)
                     verify_config(tested, entry, request["arch"])
                     reused, warning = reusable_digest(registry, request["image"], entry, request["arch"], tested)
                     if warning:
