@@ -1,7 +1,7 @@
 variable "PHP_8_3" {
   type = map(string)
   default = {
-    PHP_BASE_IMAGE = "php:8.3.36-fpm-alpine3.24@sha256:f9804e0c991b5b339d6fa4fab9edf3c9c9ae68048fb1017cb6dea6265ccef054"
+    PHP_BASE_IMAGE = "php:8.3.37-fpm-alpine3.24@sha256:5dd9d8f16428908a77e3084ef77b27ab47bf63d5af2fe5b7eb8906610672de47"
     EXTENSIONS = "bcmath gd exif intl calendar ldap zip pcntl opcache sockets mysqli pdo_pgsql pdo_mysql redis amqp xdebug pcov xhprof opentelemetry grpc protobuf"
     PACKAGES = ""
     # renovate: datasource=packagist depName=phpredis/phpredis
@@ -51,7 +51,7 @@ target "_php-8-3-trixie" {
   inherits = ["_common", "_debian"]
   labels = { "io.github.marlub.docker-php.base-target" = "php-8-3-trixie", "io.github.marlub.docker-php.default-debian" = "true" }
   args = extension_args(merge(PHP_8_3, {
-    PHP_BASE_IMAGE = "php:8.3.36-fpm-trixie@sha256:03af352853b05e35ee15ab898a2755532573684c7d1120b246dbd4e3c90f5007"
+    PHP_BASE_IMAGE = "php:8.3.37-fpm-trixie@sha256:91e22c46bcaec4bec0228ead6cfb66f9e9286adeea37eb7982336bdb104bd104"
   }))
 }
 
