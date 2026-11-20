@@ -3,7 +3,7 @@
 ARG PHP_BASE_IMAGE
 ARG NODE_BASE_IMAGE="node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5"
 ARG PIE_IMAGE="ghcr.io/php/pie:1.5.5-bin@sha256:3fca03c16df842d02b654dc382db3756058d9c128064f57cace14f8728779ce9"
-ARG COMPOSER_IMAGE="ghcr.io/composer/docker:2.11.2-bin@sha256:269d47ef954e254227bccb35e3e40f642756abee44dded405e1fbb6f5e52af0c"
+ARG COMPOSER_IMAGE="ghcr.io/composer/docker:2.11.2-bin@sha256:4eaf89f62eb9504807f2828f1829a71b7fcd202e89abe2f41c1fb2136068fbfb"
 
 FROM ${PIE_IMAGE} AS pie
 FROM ${COMPOSER_IMAGE} AS composer
