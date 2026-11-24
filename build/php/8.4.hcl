@@ -51,7 +51,7 @@ target "_php-8-4-trixie" {
   inherits = ["_common", "_debian"]
   labels = { "io.github.marlub.docker-php.base-target" = "php-8-4-trixie", "io.github.marlub.docker-php.default-debian" = "true" }
   args = extension_args(merge(PHP_8_4, {
-    PHP_BASE_IMAGE = "php:8.4.28-fpm-trixie@sha256:495ab94788034640ddd6fb313476e75570261622c42704e5ae02047b8d934ea0"
+    PHP_BASE_IMAGE = "php:8.4.28-fpm-trixie@sha256:8374ec282efaccb7350fbea59c252fcd2e73a238b06b970e8f3c74fb605f1853"
   }))
 }
 
